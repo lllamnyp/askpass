@@ -251,15 +251,20 @@ one dialog and one answer.
 
 ### Known limitations
 
-- **Approving a request hands the password to the VPS user account.** sudo
-  runs askpass as the invoking user, so `client.key` has to be readable by
-  that user. Anything running as that user, such as the agents themselves,
-  can connect with that key. It can run `askpass` directly, or speak the
-  protocol itself, and read the password you send. Everything the dialog
-  shows except the certificate name and source address is asserted by the
-  client and can be forged by such a process. The dialog is the security
-  boundary: approve only requests you expect, and treat a surprising one
-  (or a WARNING line) as a reason to deny and investigate.
+- **An agent doesn't have to go through sudo.** On a genuine `sudo -A` run
+  the password goes into a pipe that root-owned sudo reads, out of the
+  agent's reach. But sudo runs askpass as the invoking user, so `client.key`
+  has to be readable by that user and by any agent running as them. Such an
+  agent can:
+  - run `askpass` directly and read the password from its stdout;
+  - wrap it in its own `SUDO_ASKPASS` script;
+  - use the key with its own client.
+
+  The WARNING line catches the first two. The third can forge every field
+  except the certificate name and source address. Approve only requests you
+  expect, and treat a surprising one as a reason to deny and investigate.
+  The [roadmap](docs/roadmap.md) describes a root-owned VPS daemon that
+  would close this gap.
 - **sudo caches credentials.** After one successful prompt, sudo by default
   won't ask again for 15 minutes on the same terminal (`timestamp_timeout`).
   askpass caches nothing, but sudo does. If every sudo should prompt, set
