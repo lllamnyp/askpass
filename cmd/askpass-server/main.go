@@ -5,295 +5,312 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
+	"github.com/lllamnyp/askpass/internal/client"
 	"github.com/lllamnyp/askpass/internal/dialog"
 	"github.com/lllamnyp/askpass/internal/harden"
 	"github.com/lllamnyp/askpass/internal/pki"
+	"github.com/lllamnyp/askpass/internal/protocol"
 	"github.com/lllamnyp/askpass/internal/server"
 )
 
 var version = "dev"
 
 const (
-	defaultListen = "10.99.0.2:7676"
-	caName        = "ca"
-	serverName    = "server"
+	caName     = "ca"
+	serverName = "server"
+	configFile = "config.yaml"
 )
 
-const usage = `askpass-server: answer askpass sudo password requests from a dialog.
-
-Commands:
-  serve          listen for requests and prompt for each one
-  init-ca        create the CA
-  issue-server   issue the server certificate
-  issue-client   issue a client key, certificate and config bundle
-  sign-csr       issue a client certificate for a CSR made with "askpass --csr"
-  version
-
-Run "askpass-server <command> -h" for the flags of each command.
-`
-
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
-	}
-	cmd, args := os.Args[1], os.Args[2:]
-	var err error
-	switch cmd {
-	case "serve":
-		err = serve(args)
-	case "init-ca":
-		err = initCA(args)
-	case "issue-server":
-		err = issueServer(args)
-	case "issue-client":
-		err = issueClient(args)
-	case "sign-csr":
-		err = signCSR(args)
-	case "version", "--version":
-		fmt.Println("askpass-server", version)
-	case "help", "-h", "--help":
-		fmt.Fprint(os.Stdout, usage)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, usage)
-		os.Exit(2)
-	}
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			os.Exit(2)
-		}
-		fmt.Fprintf(os.Stderr, "askpass-server %s: %v\n", cmd, err)
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "askpass-server: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// defaultDir is $ASKPASS_SERVER_DIR, else $XDG_CONFIG_HOME/askpass-server,
-// else ~/.config/askpass-server, or "" if none can be determined.
-func defaultDir() string {
-	if d := os.Getenv("ASKPASS_SERVER_DIR"); d != "" {
-		return d
-	}
-	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
-		return filepath.Join(d, "askpass-server")
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".config", "askpass-server")
-	}
-	return ""
+// app carries the settings shared by every subcommand. A flag can also be
+// set by an ASKPASS_SERVER_<FLAG> environment variable or a key in
+// <dir>/config.yaml, which take precedence in that order.
+type app struct {
+	v   *viper.Viper
+	dir string
 }
 
-func newFlags(name string) (*flag.FlagSet, *string) {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	dir := fs.String("dir", defaultDir(), "directory holding the CA and server certificate (env ASKPASS_SERVER_DIR)")
-	return fs, dir
+func newRootCmd() *cobra.Command {
+	a := &app{v: viper.New()}
+	a.v.SetEnvPrefix("ASKPASS_SERVER")
+	a.v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	a.v.AutomaticEnv()
+
+	root := &cobra.Command{
+		Use:               "askpass-server",
+		Short:             "Answer askpass sudo password requests from a dialog",
+		Version:           version,
+		SilenceUsage:      true,
+		SilenceErrors:     true,
+		PersistentPreRunE: a.load,
+	}
+	root.PersistentFlags().String("dir", "", "directory holding the CA, server certificate and config.yaml (default $XDG_CONFIG_HOME/askpass-server or ~/.config/askpass-server)")
+	root.AddCommand(a.serveCmd(), a.initCACmd(), a.issueServerCmd(), a.issueClientCmd(), a.signCSRCmd())
+	return root
 }
 
-func parse(fs *flag.FlagSet, dir *string, args []string) error {
-	if err := fs.Parse(args); err != nil {
+// load binds the running command's flags, resolves the directory and reads
+// its config.yaml if there is one.
+func (a *app) load(cmd *cobra.Command, _ []string) error {
+	if err := a.v.BindPFlags(cmd.Flags()); err != nil {
 		return err
 	}
-	if *dir == "" {
-		return errors.New("cannot determine the home directory; pass -dir or set ASKPASS_SERVER_DIR")
+	a.dir = a.v.GetString("dir")
+	if a.dir == "" {
+		if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+			a.dir = filepath.Join(d, "askpass-server")
+		} else if home, err := os.UserHomeDir(); err == nil {
+			a.dir = filepath.Join(home, ".config", "askpass-server")
+		} else {
+			return errors.New("cannot determine the home directory; pass --dir or set ASKPASS_SERVER_DIR")
+		}
+	}
+	a.v.SetConfigFile(filepath.Join(a.dir, configFile))
+	if err := a.v.ReadInConfig(); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("reading %s: %w", a.v.ConfigFileUsed(), err)
 	}
 	return nil
 }
 
-func paths(dir, name string) (cert, key string) {
-	return filepath.Join(dir, name+".crt"), filepath.Join(dir, name+".key")
+func (a *app) paths(name string) (cert, key string) {
+	return filepath.Join(a.dir, name+".crt"), filepath.Join(a.dir, name+".key")
 }
 
-func serve(args []string) error {
-	fs, dir := newFlags("serve")
-	listen := fs.String("listen", defaultListen, "address to listen on")
-	timeout := fs.Duration("timeout", server.DefaultTimeout, "how long a request waits for an answer")
-	zenity := fs.String("zenity", "zenity", "zenity executable")
-	if err := parse(fs, dir, args); err != nil {
-		return err
+func (a *app) loadCA() (*pki.CA, error) {
+	return pki.LoadCA(a.paths(caName))
+}
+
+func (a *app) serveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Listen for requests and prompt for each one",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			listen := a.v.GetString("listen")
+			if listen == "" {
+				return errors.New("no listen address: pass --listen, set ASKPASS_SERVER_LISTEN, or set listen in " + filepath.Join(a.dir, configFile))
+			}
+			return a.serve(cmd.Context(), listen, a.v.GetInt("port"))
+		},
+	}
+	f := cmd.Flags()
+	f.String("listen", "", "IP address or host name to listen on (required)")
+	f.Int("port", protocol.DefaultPort, "TCP port to listen on")
+	f.Duration("timeout", server.DefaultTimeout, "how long a request waits for an answer")
+	f.String("zenity", "zenity", "zenity executable")
+	return cmd
+}
+
+func (a *app) serve(ctx context.Context, listen string, port int) error {
+	if _, _, err := net.SplitHostPort(listen); err == nil {
+		return fmt.Errorf("listen address %q includes a port; set it with --port", listen)
 	}
 	if err := harden.Process(); err != nil {
 		return fmt.Errorf("hardening process: %w", err)
 	}
-	caCert, _ := paths(*dir, caName)
-	cert, key := paths(*dir, serverName)
+	caCert, _ := a.paths(caName)
+	cert, key := a.paths(serverName)
 	tlsConfig, err := pki.ServerTLSConfig(caCert, cert, key)
 	if err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp", *listen)
+	ln, err := net.Listen("tcp", net.JoinHostPort(strings.Trim(listen, "[]"), strconv.Itoa(port)))
 	if err != nil {
 		return err
 	}
+	timeout := a.v.GetDuration("timeout")
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	logger.Info("listening", "addr", ln.Addr().String(), "timeout", timeout.String())
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	s := &server.Server{
 		TLSConfig: tlsConfig,
-		Prompter:  &dialog.Zenity{Path: *zenity},
-		Timeout:   *timeout,
+		Prompter:  &dialog.Zenity{Path: a.v.GetString("zenity")},
+		Timeout:   timeout,
 		Logger:    logger,
 	}
 	return s.Serve(ctx, ln)
 }
 
-func initCA(args []string) error {
-	fs, dir := newFlags("init-ca")
-	name := fs.String("name", "askpass CA", "CA common name")
-	validity := fs.Duration("validity", pki.CAValidity, "CA validity")
-	if err := parse(fs, dir, args); err != nil {
-		return err
+func (a *app) initCACmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "init-ca",
+		Short: "Create the CA",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := os.MkdirAll(a.dir, 0o700); err != nil {
+				return err
+			}
+			ca, keyPEM, err := pki.NewCA(a.v.GetString("name"), a.v.GetDuration("validity"))
+			if err != nil {
+				return err
+			}
+			certPath, keyPath := a.paths(caName)
+			if err := pki.WriteNew(keyPath, keyPEM, 0o600); err != nil {
+				return err
+			}
+			if err := pki.WriteNew(certPath, ca.CertPEM, 0o644); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s and %s\n", certPath, keyPath)
+			return nil
+		},
 	}
-	if err := os.MkdirAll(*dir, 0o700); err != nil {
-		return err
-	}
-	ca, keyPEM, err := pki.NewCA(*name, *validity)
-	if err != nil {
-		return err
-	}
-	certPath, keyPath := paths(*dir, caName)
-	if err := pki.WriteNew(keyPath, keyPEM, 0o600); err != nil {
-		return err
-	}
-	if err := pki.WriteNew(certPath, ca.CertPEM, 0o644); err != nil {
-		return err
-	}
-	fmt.Printf("wrote %s and %s\n", certPath, keyPath)
-	return nil
+	cmd.Flags().String("name", "askpass CA", "CA common name")
+	cmd.Flags().Duration("validity", pki.CAValidity, "CA validity")
+	return cmd
 }
 
-func loadCA(dir string) (*pki.CA, error) {
-	return pki.LoadCA(paths(dir, caName))
+func (a *app) issueServerCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "issue-server",
+		Short: "Issue the server certificate",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var ips []net.IP
+			for _, s := range a.v.GetStringSlice("ip") {
+				ip := net.ParseIP(s)
+				if ip == nil {
+					return fmt.Errorf("invalid IP address %q", s)
+				}
+				ips = append(ips, ip)
+			}
+			ca, err := a.loadCA()
+			if err != nil {
+				return err
+			}
+			certPEM, keyPEM, err := ca.IssueServer(a.v.GetString("name"), ips, a.v.GetStringSlice("dns"), a.v.GetDuration("validity"))
+			if err != nil {
+				return err
+			}
+			certPath, keyPath := a.paths(serverName)
+			if err := pki.WriteNew(keyPath, keyPEM, 0o600); err != nil {
+				return err
+			}
+			if err := pki.WriteNew(certPath, certPEM, 0o644); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s and %s\n", certPath, keyPath)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringSlice("ip", nil, "IP addresses the certificate is valid for")
+	f.StringSlice("dns", nil, "DNS names the certificate is valid for")
+	f.String("name", "askpass-server", "certificate common name")
+	f.Duration("validity", pki.LeafValidity, "certificate validity")
+	cmd.MarkFlagsOneRequired("ip", "dns")
+	return cmd
 }
 
-func issueServer(args []string) error {
-	fs, dir := newFlags("issue-server")
-	name := fs.String("name", "askpass-server", "certificate common name")
-	ips := fs.String("ip", strings.Split(defaultListen, ":")[0], "comma-separated IP addresses the certificate is valid for")
-	dns := fs.String("dns", "", "comma-separated DNS names the certificate is valid for")
-	validity := fs.Duration("validity", pki.LeafValidity, "certificate validity")
-	if err := parse(fs, dir, args); err != nil {
-		return err
+func (a *app) issueClientCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "issue-client",
+		Short: "Issue a client key, certificate and config bundle",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			name, out := a.v.GetString("name"), a.v.GetString("out")
+			if out == "" {
+				out = "askpass-" + name
+			}
+			ca, err := a.loadCA()
+			if err != nil {
+				return err
+			}
+			certPEM, keyPEM, err := ca.IssueClient(name, a.v.GetDuration("validity"))
+			if err != nil {
+				return err
+			}
+			if err := os.Mkdir(out, 0o700); err != nil {
+				return err
+			}
+			files := []struct {
+				name string
+				data []byte
+				mode os.FileMode
+			}{
+				{"client.key", keyPEM, 0o600},
+				{"client.crt", certPEM, 0o644},
+				{"ca.crt", ca.CertPEM, 0o644},
+			}
+			for _, f := range files {
+				if err := pki.WriteNew(filepath.Join(out, f.name), f.data, f.mode); err != nil {
+					return err
+				}
+			}
+			cfg := viper.New()
+			cfg.Set("server", a.v.GetString("server"))
+			cfg.Set("port", a.v.GetInt("port"))
+			if err := cfg.SafeWriteConfigAs(filepath.Join(out, client.ConfigFile)); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote client bundle to %s/; copy it to ~/.config/askpass/ on the client\n", out)
+			return nil
+		},
 	}
-	ca, err := loadCA(*dir)
-	if err != nil {
-		return err
-	}
-	var ipList []net.IP
-	for _, s := range splitList(*ips) {
-		ip := net.ParseIP(s)
-		if ip == nil {
-			return fmt.Errorf("invalid IP address %q", s)
-		}
-		ipList = append(ipList, ip)
-	}
-	certPEM, keyPEM, err := ca.IssueServer(*name, ipList, splitList(*dns), *validity)
-	if err != nil {
-		return err
-	}
-	certPath, keyPath := paths(*dir, serverName)
-	if err := pki.WriteNew(keyPath, keyPEM, 0o600); err != nil {
-		return err
-	}
-	if err := pki.WriteNew(certPath, certPEM, 0o644); err != nil {
-		return err
-	}
-	fmt.Printf("wrote %s and %s\n", certPath, keyPath)
-	return nil
+	f := cmd.Flags()
+	f.String("name", "", "client common name, conventionally the client's hostname")
+	f.String("server", "", "server IP address or host name written into the bundle's config")
+	f.Int("port", protocol.DefaultPort, "server port written into the bundle's config")
+	f.String("out", "", "bundle directory to create (default ./askpass-<name>)")
+	f.Duration("validity", pki.LeafValidity, "certificate validity")
+	_ = cmd.MarkFlagRequired("name")
+	_ = cmd.MarkFlagRequired("server")
+	return cmd
 }
 
-func issueClient(args []string) error {
-	fs, dir := newFlags("issue-client")
-	name := fs.String("name", "", "client common name, conventionally the client's hostname (required)")
-	out := fs.String("out", "", "bundle directory to create (default ./askpass-<name>)")
-	srv := fs.String("server", defaultListen, "server address written into the bundle's config")
-	validity := fs.Duration("validity", pki.LeafValidity, "certificate validity")
-	if err := parse(fs, dir, args); err != nil {
-		return err
+func (a *app) signCSRCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "sign-csr",
+		Short: `Issue a client certificate for a CSR made with "askpass csr"`,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			csrPEM, err := os.ReadFile(a.v.GetString("csr"))
+			if err != nil {
+				return err
+			}
+			ca, err := a.loadCA()
+			if err != nil {
+				return err
+			}
+			certPEM, err := ca.SignClientCSR(csrPEM, a.v.GetString("name"), a.v.GetDuration("validity"))
+			if err != nil {
+				return err
+			}
+			out := a.v.GetString("out")
+			if err := pki.WriteNew(out, certPEM, 0o644); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", out)
+			return nil
+		},
 	}
-	if *name == "" {
-		return errors.New("-name is required")
-	}
-	if *out == "" {
-		*out = "askpass-" + *name
-	}
-	ca, err := loadCA(*dir)
-	if err != nil {
-		return err
-	}
-	certPEM, keyPEM, err := ca.IssueClient(*name, *validity)
-	if err != nil {
-		return err
-	}
-	if err := os.Mkdir(*out, 0o700); err != nil {
-		return err
-	}
-	files := []struct {
-		name string
-		data []byte
-		mode os.FileMode
-	}{
-		{"client.key", keyPEM, 0o600},
-		{"client.crt", certPEM, 0o644},
-		{"ca.crt", ca.CertPEM, 0o644},
-		{"config", []byte("server = " + *srv + "\n"), 0o644},
-	}
-	for _, f := range files {
-		if err := pki.WriteNew(filepath.Join(*out, f.name), f.data, f.mode); err != nil {
-			return err
-		}
-	}
-	fmt.Printf("wrote client bundle to %s/; copy it to ~/.config/askpass/ on the client\n", *out)
-	return nil
-}
-
-func signCSR(args []string) error {
-	fs, dir := newFlags("sign-csr")
-	csrPath := fs.String("csr", "", "CSR file from \"askpass --csr\" (required)")
-	out := fs.String("out", "client.crt", "certificate file to write")
-	name := fs.String("name", "", "override the common name requested in the CSR")
-	validity := fs.Duration("validity", pki.LeafValidity, "certificate validity")
-	if err := parse(fs, dir, args); err != nil {
-		return err
-	}
-	if *csrPath == "" {
-		return errors.New("-csr is required")
-	}
-	csrPEM, err := os.ReadFile(*csrPath)
-	if err != nil {
-		return err
-	}
-	ca, err := loadCA(*dir)
-	if err != nil {
-		return err
-	}
-	certPEM, err := ca.SignClientCSR(csrPEM, *name, *validity)
-	if err != nil {
-		return err
-	}
-	if err := pki.WriteNew(*out, certPEM, 0o644); err != nil {
-		return err
-	}
-	fmt.Printf("wrote %s\n", *out)
-	return nil
-}
-
-func splitList(s string) []string {
-	var out []string
-	for p := range strings.SplitSeq(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
+	f := cmd.Flags()
+	f.String("csr", "", `CSR file from "askpass csr"`)
+	f.String("out", "client.crt", "certificate file to write")
+	f.String("name", "", "override the common name requested in the CSR")
+	f.Duration("validity", pki.LeafValidity, "certificate validity")
+	_ = cmd.MarkFlagRequired("csr")
+	return cmd
 }

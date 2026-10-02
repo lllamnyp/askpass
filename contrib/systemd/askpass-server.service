@@ -11,7 +11,9 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-ExecStart=%h/.local/bin/askpass-server serve -listen 10.99.0.2:7676
+# Set listen (and optionally port, timeout) in
+# ~/.config/askpass-server/config.yaml; serve refuses to start without it.
+ExecStart=%h/.local/bin/askpass-server serve
 # The private-network address may come up after login; keep retrying.
 Restart=always
 RestartSec=10

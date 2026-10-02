@@ -20,6 +20,9 @@ import (
 // Version is the protocol version carried in every request.
 const Version = 1
 
+// DefaultPort is the server's default TCP port.
+const DefaultPort = 7676
+
 const (
 	// MaxRequestSize bounds the request line.
 	MaxRequestSize = 64 << 10

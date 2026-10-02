@@ -25,9 +25,9 @@ There are two static binaries:
   as its `SUDO_ASKPASS` helper. It connects to the laptop, sends a description
   of the request and prints the password it gets back. If the request is
   denied, times out or the laptop can't be reached, it exits 1 and sudo fails.
-- **`askpass-server`** runs on your laptop. It listens on the private-network
-  address (default `10.99.0.2:7676`) and shows a zenity dialog for every
-  request. It also holds the PKI: it creates the CA and issues the server and
+- **`askpass-server`** runs on your laptop. It listens on an address you
+  choose, normally a private-network one (there is no default address; the
+  default port is 7676), and shows a zenity dialog for every request. It also holds the PKI: it creates the CA and issues the server and
   client certificates.
 
 ## Build
@@ -45,8 +45,8 @@ ships with GNOME.
 
 ## Laptop setup
 
-These steps assume the laptop's private-network address is `10.99.0.2`.
-Substitute your own where it differs.
+The examples use `10.99.0.2` as the laptop's private-network address.
+Substitute your own.
 
 1. Install the binary and check zenity is there:
 
@@ -56,26 +56,42 @@ Substitute your own where it differs.
    ```
 
 2. Create the CA and the server certificate. Everything goes into
-   `~/.config/askpass-server/` (override with `-dir` or `ASKPASS_SERVER_DIR`).
+   `~/.config/askpass-server/` (override with `--dir` or `ASKPASS_SERVER_DIR`).
    Existing files are never overwritten.
 
    ```sh
    askpass-server init-ca
-   askpass-server issue-server -ip 10.99.0.2
+   askpass-server issue-server --ip 10.99.0.2
    ```
 
-   `issue-server` takes a comma-separated `-ip` list and an optional `-dns`
-   list. The client checks the server certificate against the address it
-   dials, or against `server_name` if the client config sets one.
+   `issue-server` needs at least one `--ip` or `--dns`; both take
+   comma-separated lists. The client checks the server certificate against
+   the address it dials, or against `server_name` if the client config sets
+   one.
 
-3. Try it in the foreground:
+3. Configure and try the server. It refuses to start without a listen
+   address. Every `serve` flag can be given on the command line, as an
+   `ASKPASS_SERVER_<FLAG>` environment variable, or as a key in
+   `~/.config/askpass-server/config.yaml`; the command line wins, then the
+   environment, then the file.
 
    ```sh
-   askpass-server serve                      # listens on 10.99.0.2:7676
-   askpass-server serve -listen 10.99.0.2:9000 -timeout 2m
+   askpass-server serve --listen 10.99.0.2              # port 7676
+   askpass-server serve --listen 10.99.0.2 --port 9000 --timeout 2m
    ```
 
-4. Run it as a systemd user service tied to the graphical session:
+   For a permanent setup, put the settings in the config file:
+
+   ```yaml
+   # ~/.config/askpass-server/config.yaml
+   listen: 10.99.0.2
+   # port: 7676
+   # timeout: 60s
+   # zenity: /usr/bin/zenity
+   ```
+
+4. Run it as a systemd user service tied to the graphical session. The unit
+   carries no address; it reads `listen` from the config file above.
 
    ```sh
    install -Dm 0644 contrib/systemd/askpass-server.service \
@@ -85,8 +101,7 @@ Substitute your own where it differs.
    journalctl --user -u askpass-server -f
    ```
 
-   Edit `ExecStart` in the unit to change the address, port or timeout. The
-   unit restarts the server until the private-network address is up.
+   The unit restarts the server until the private-network address is up.
    If requests fail with "dialog failed", check that the user manager has
    the session's display variables: `systemctl --user show-environment | grep
    DISPLAY` should list `WAYLAND_DISPLAY` (and `DISPLAY` for Xwayland). If they
@@ -109,20 +124,20 @@ can open a window.
 
    ```sh
    # On the VPS:
-   askpass --csr "$(hostname)"           # writes ~/.config/askpass/client.{key,csr}
+   askpass csr "$(hostname)"             # writes ~/.config/askpass/client.{key,csr}
    # Copy client.csr to the laptop, then on the laptop:
-   askpass-server sign-csr -csr client.csr -out client.crt
+   askpass-server sign-csr --csr client.csr --out client.crt
    # Copy client.crt and ~/.config/askpass-server/ca.crt back to the VPS's
    # ~/.config/askpass/, then on the VPS:
-   echo 'server = 10.99.0.2:7676' > ~/.config/askpass/config
+   echo 'server: 10.99.0.2' > ~/.config/askpass/config.yaml
    ```
 
    **b) Bundle generated on the laptop.**
 
    ```sh
    # On the laptop:
-   askpass-server issue-client -name my-vps -server 10.99.0.2:7676
-   # writes ./askpass-my-vps/{client.key,client.crt,ca.crt,config}
+   askpass-server issue-client --name my-vps --server 10.99.0.2
+   # writes ./askpass-my-vps/{client.key,client.crt,ca.crt,config.yaml}
    scp -r askpass-my-vps my-vps:.config/askpass   # target must not exist yet
    rm -r askpass-my-vps     # don't leave the client key lying around
    ```
@@ -131,7 +146,7 @@ can open a window.
 
    ```
    ~/.config/askpass/        (0700)
-   ├── config                server = 10.99.0.2:7676
+   ├── config.yaml           server: 10.99.0.2
    ├── ca.crt                the askpass CA certificate
    ├── client.crt
    └── client.key            (0600)
@@ -159,20 +174,22 @@ can open a window.
 
 ### Client configuration
 
-The client reads `$ASKPASS_CONFIG_DIR/config`, else
-`$XDG_CONFIG_HOME/askpass/config`, else `~/.config/askpass/config`. The file
-holds `key = value` lines; `#` starts a comment.
+The client reads `config.yaml` from `$ASKPASS_CONFIG_DIR`, else
+`$XDG_CONFIG_HOME/askpass`, else `~/.config/askpass`. Unknown keys are an
+error. Each key can be overridden by an `ASKPASS_<KEY>` environment variable,
+e.g. `ASKPASS_SERVER`.
 
 | key           | default                 | meaning                                                   |
 |---------------|-------------------------|-----------------------------------------------------------|
-| `server`      | (required)              | `host:port` of askpass-server; the port defaults to 7676  |
+| `server`      | (required)              | IP address or host name of askpass-server                 |
+| `port`        | `7676`                  | its TCP port                                              |
 | `server_name` | host part of `server`   | name or IP the server certificate must be valid for       |
 | `ca`          | `ca.crt`                | CA certificate; relative paths resolve against the config dir |
 | `cert`        | `client.crt`            | client certificate                                        |
 | `key`         | `client.key`            | client private key                                        |
 | `timeout`     | `90s`                   | give up on the whole exchange after this long             |
 
-Keep the client `timeout` longer than the server's `-timeout` (default 60s)
+Keep the client `timeout` longer than the server's `--timeout` (default 60s)
 so that a slow answer is reported as a server-side timeout.
 
 ## What the dialog shows
@@ -246,7 +263,7 @@ one dialog and one answer.
 | stage                                 | limit                              |
 |---------------------------------------|------------------------------------|
 | TLS handshake and reading the request | 10s                                |
-| waiting for an answer (incl. queueing)| server `-timeout`, default 60s; the dialog is then closed |
+| waiting for an answer (incl. queueing)| server `--timeout`, default 60s; the dialog is then closed |
 | whole exchange, on the client         | client `timeout`, default 90s      |
 
 ### Known limitations
@@ -274,7 +291,7 @@ one dialog and one answer.
   zenity's (GTK's) own memory, and sudo's. The process memory isn't locked,
   so it could be swapped out; use encrypted swap if that matters to you.
 - **No revocation list.** To revoke a client certificate, create a new CA in
-  a fresh `-dir`, then reissue the server certificate and every remaining
+  a fresh `--dir`, then reissue the server certificate and every remaining
   client certificate.
 - **Only coarse rate limiting.** A client holding a valid certificate can
   keep up to 3 requests queued and so can raise dialog after dialog. Anyone
@@ -316,10 +333,10 @@ the server:
 D=$(mktemp -d)
 export ASKPASS_SERVER_DIR=$D/laptop ASKPASS_CONFIG_DIR=$D/vps
 bin/askpass-server init-ca
-bin/askpass-server issue-server -ip 127.0.0.1
-bin/askpass-server issue-client -name test -server 127.0.0.1:7676 -out "$ASKPASS_CONFIG_DIR"
+bin/askpass-server issue-server --ip 127.0.0.1
+bin/askpass-server issue-client --name test --server 127.0.0.1 --out "$ASKPASS_CONFIG_DIR"
 printf '#!/bin/sh\necho hunter2\n' > "$D/zenity" && chmod +x "$D/zenity"
-bin/askpass-server serve -listen 127.0.0.1:7676 -zenity "$D/zenity" &
+bin/askpass-server serve --listen 127.0.0.1 --zenity "$D/zenity" &
 sleep 1
 bin/askpass 'test prompt: '    # prints hunter2
 kill %1

@@ -10,20 +10,20 @@ import (
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
 func TestLoadConfig(t *testing.T) {
-	dir := writeConfig(t, "# comment\nserver = 10.99.0.2\n\ntimeout = 30s\nkey = /abs/client.key\n")
+	dir := writeConfig(t, "# comment\nserver: 10.99.0.2\ntimeout: 30s\nkey: /abs/client.key\n")
 	cfg, err := LoadConfig(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server != "10.99.0.2:"+DefaultPort || cfg.ServerName != "10.99.0.2" {
-		t.Errorf("server %q name %q", cfg.Server, cfg.ServerName)
+	if cfg.Addr != "10.99.0.2:7676" || cfg.ServerName != "10.99.0.2" {
+		t.Errorf("addr %q name %q", cfg.Addr, cfg.ServerName)
 	}
 	if cfg.Timeout != 30*time.Second {
 		t.Errorf("timeout %v", cfg.Timeout)
@@ -32,31 +32,49 @@ func TestLoadConfig(t *testing.T) {
 		t.Errorf("paths: ca %q key %q", cfg.CA, cfg.Key)
 	}
 
-	cfg, err = LoadConfig(writeConfig(t, "server = [fd00::2]\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Server != "[fd00::2]:"+DefaultPort || cfg.ServerName != "fd00::2" {
-		t.Errorf("ipv6: server %q name %q", cfg.Server, cfg.ServerName)
+	for _, server := range []string{"fd00::2", "\"[fd00::2]\""} {
+		cfg, err = LoadConfig(writeConfig(t, "server: "+server+"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Addr != "[fd00::2]:7676" || cfg.ServerName != "fd00::2" {
+			t.Errorf("ipv6 %s: addr %q name %q", server, cfg.Addr, cfg.ServerName)
+		}
 	}
 
-	cfg, err = LoadConfig(writeConfig(t, "server = laptop.lan:9000\nserver_name = askpass\n"))
+	cfg, err = LoadConfig(writeConfig(t, "server: laptop.lan\nport: 9000\nserver_name: askpass\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server != "laptop.lan:9000" || cfg.ServerName != "askpass" || cfg.Timeout != DefaultTimeout {
+	if cfg.Addr != "laptop.lan:9000" || cfg.ServerName != "askpass" || cfg.Timeout != DefaultTimeout {
 		t.Errorf("got %+v", cfg)
+	}
+}
+
+func TestLoadConfigEnv(t *testing.T) {
+	t.Setenv("ASKPASS_SERVER", "10.0.0.1")
+	t.Setenv("ASKPASS_PORT", "1234")
+	cfg, err := LoadConfig(writeConfig(t, "server: 10.99.0.2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Addr != "10.0.0.1:1234" {
+		t.Errorf("env override ignored: %q", cfg.Addr)
+	}
+	// No config file at all: the environment alone suffices.
+	if _, err := LoadConfig(t.TempDir()); err != nil {
+		t.Errorf("env-only config: %v", err)
 	}
 }
 
 func TestLoadConfigErrors(t *testing.T) {
 	for name, body := range map[string]string{
-		"no server":   "timeout = 5s\n",
-		"unknown key": "server = x\nport = 1\n",
-		"bad line":    "server x\n",
-		"bad timeout": "server = x\ntimeout = soon\n",
-		"bare ipv6":   "server = fd00::2\n",
-		"extra colon": "server = host:7676:x\n",
+		"no server":      "timeout: 5s\n",
+		"unknown key":    "server: x\nlisten: y\n",
+		"bad yaml":       "server: [x\n",
+		"bad timeout":    "server: x\ntimeout: soon\n",
+		"port in server": "server: host:7676\n",
+		"bad port":       "server: x\nport: 70000\n",
 	} {
 		if _, err := LoadConfig(writeConfig(t, body)); err == nil {
 			t.Errorf("%s: accepted", name)
