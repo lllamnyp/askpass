@@ -72,7 +72,11 @@ func (p *Prompt) Lines() [][2]string {
 // IsSudo reports whether the client claims a parent named sudo with EUID 0,
 // which a non-root process cannot produce. A lying client can still claim it.
 func IsSudo(r *protocol.Request) bool {
-	return (r.ParentName == "sudo" || r.ParentName == "sudo-rs") && r.ParentEUID == 0
+	switch r.ParentName {
+	case "sudo", "sudo-rs", "sudo.ws":
+		return r.ParentEUID == 0
+	}
+	return false
 }
 
 // FormatArgs renders a command line as one sanitized, shell-quoted string

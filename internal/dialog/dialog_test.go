@@ -76,6 +76,12 @@ func TestLinesSudoWarning(t *testing.T) {
 	if hasWarning(p) {
 		t.Error("warning for a real sudo parent")
 	}
+	for _, name := range []string{"sudo-rs", "sudo.ws"} {
+		p.Request.ParentName = name
+		if hasWarning(p) {
+			t.Errorf("warning for a real %s parent", name)
+		}
+	}
 	p.Request.ParentEUID = 1000
 	if !hasWarning(p) {
 		t.Error("no warning for a non-root process named sudo")
