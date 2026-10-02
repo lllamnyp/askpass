@@ -1,18 +1,11 @@
-// Package protocol defines the wire format spoken between the askpass client
-// and server over an established mTLS connection.
+// Package protocol is the askpass wire format. Over an established mTLS
+// connection the client sends one Request as a JSON line; the server replies
+// with one binary frame and closes the connection:
 //
-// The client sends exactly one Request as a single JSON line. The server
-// answers with exactly one binary response frame and closes the connection:
+//	status (1 byte) | length (2 bytes, big endian) | payload
 //
-//	+--------+----------------+-----------------+
-//	| status | length (BE u16)| payload         |
-//	| 1 byte | 2 bytes        | length bytes    |
-//	+--------+----------------+-----------------+
-//
-// For StatusOK the payload is the password; for every other status it is a
-// short human-readable reason. The response is binary rather than JSON so the
-// password lands in a single []byte the caller owns and can zero, instead of
-// passing through string conversions and encoder buffers.
+// The payload is the password for StatusOK, otherwise a short reason. Being
+// binary, the password lands in one caller-owned []byte that can be cleared.
 package protocol
 
 import (
@@ -28,8 +21,7 @@ import (
 const Version = 1
 
 const (
-	// MaxRequestSize bounds the request line, so a client cannot make the
-	// server buffer unbounded input.
+	// MaxRequestSize bounds the request line.
 	MaxRequestSize = 64 << 10
 	// MaxPayload bounds a response payload (password or reason).
 	MaxPayload = 4096

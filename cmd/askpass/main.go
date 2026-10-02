@@ -1,11 +1,5 @@
 // Command askpass is a SUDO_ASKPASS program that fetches the sudo password
 // from an askpass-server over mTLS.
-//
-// Usage:
-//
-//	SUDO_ASKPASS=/usr/local/bin/askpass sudo -A <command>
-//	askpass --csr <name>   generate client.key and client.csr in the config dir
-//	askpass --version
 package main
 
 import (
@@ -87,7 +81,8 @@ func ask(prompt string) error {
 		}
 		return err
 	}
-	// One write of password and newline, from a buffer cleared right after.
+	// Copy, don't append: append may share pw's array, and clear(pw) would
+	// wipe out before the write.
 	out := make([]byte, len(pw)+1)
 	copy(out, pw)
 	out[len(pw)] = '\n'

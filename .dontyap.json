@@ -1,0 +1,6 @@
+{
+  "classes": {
+    "default": { "maxBlockLines": 10 }
+  },
+  "ratio": { "max": 0.4 }
+}

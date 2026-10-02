@@ -72,8 +72,7 @@ func (z *Zenity) Ask(ctx context.Context, p *Prompt) ([]byte, error) {
 		out = out[:len(out)-1]
 	}
 	if len(out) == 0 {
-		// Send with an empty field is almost always a stray Enter; relaying
-		// it would only cost a failed sudo attempt.
+		// An empty Send counts as Deny: it is almost always a stray Enter.
 		return nil, ErrDenied
 	}
 	return append([]byte(nil), out...), nil

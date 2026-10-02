@@ -69,11 +69,8 @@ func (p *Prompt) Lines() [][2]string {
 	return lines
 }
 
-// IsSudo reports whether the client says it was started by a process named
-// sudo running with effective UID 0. An unprivileged user can name a binary
-// "sudo" but cannot give it EUID 0 without a setuid root sudo, so this tells
-// accidental direct invocations apart from real sudo prompts. It is no
-// defence against a client lying about it.
+// IsSudo reports whether the client claims a parent named sudo with EUID 0,
+// which a non-root process cannot produce. A lying client can still claim it.
 func IsSudo(r *protocol.Request) bool {
 	return (r.ParentName == "sudo" || r.ParentName == "sudo-rs") && r.ParentEUID == 0
 }

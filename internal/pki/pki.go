@@ -1,5 +1,5 @@
 // Package pki creates the private CA askpass uses for mTLS and issues server
-// and client certificates from it. All keys are ECDSA P-256 in PKCS#8 PEM.
+// and client certificates from it. Keys it generates are ECDSA P-256 in PKCS#8 PEM.
 package pki
 
 import (
@@ -178,8 +178,7 @@ func checkKey(pub crypto.PublicKey) error {
 	return fmt.Errorf("unsupported public key type %T", pub)
 }
 
-// NewClientKeyAndCSR generates a client key and a CSR for it, so the key can
-// be created on the machine that will use it and never leave it.
+// NewClientKeyAndCSR generates a client key and a CSR for it.
 func NewClientKeyAndCSR(commonName string) (keyPEM, csrPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

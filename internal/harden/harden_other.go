@@ -1,6 +1,5 @@
 //go:build unix && !linux
 
-// Package harden reduces the ways a password held in process memory can leak.
 package harden
 
 import "syscall"

@@ -32,7 +32,7 @@ There are two static binaries:
 
 ## Build
 
-Requires Go 1.26 or newer.
+Requires Go 1.26.4 or newer.
 
 ```sh
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/ ./cmd/...
@@ -292,7 +292,10 @@ one dialog and one answer.
 ```sh
 go vet ./...
 go test ./...
+go tool dontyap ./...    # comment lint; version pinned in go.mod, limits in .dontyap.json
 ```
+
+CI runs all three on every push to `main` and on every pull request.
 
 The tests cover everything except a real dialog and a real sudo:
 
