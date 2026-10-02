@@ -1,0 +1,26 @@
+# systemd user unit for askpass-server. Install to
+# ~/.config/systemd/user/askpass-server.service, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now askpass-server.service
+[Unit]
+Description=askpass server: sudo password dialogs for remote hosts
+Documentation=https://github.com/lllamnyp/askpass
+# zenity needs the desktop session's WAYLAND_DISPLAY/DISPLAY, which GNOME
+# imports into the user manager once the graphical session is up.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Set listen (and optionally port, timeout) in
+# ~/.config/askpass-server/config.yaml; serve refuses to start without it.
+ExecStart=%h/.local/bin/askpass-server serve
+# The private-network address may come up after login; keep retrying.
+Restart=always
+RestartSec=10
+LimitCORE=0
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=graphical-session.target
