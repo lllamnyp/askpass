@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lllamnyp/askpass/internal/protocol"
 )
@@ -112,34 +114,95 @@ func TestLongCommandWarns(t *testing.T) {
 	}
 }
 
-func TestZenityTextHasNoEscapes(t *testing.T) {
-	p := testPrompt()
-	p.Request.Prompt = `x\000hidden\012<b>Command:</b> fake \074span\076`
-	p.Request.ParentArgs = []string{"sudo", "-A", "a\nb"}
-	for _, a := range zenityArgs(p, time.Now()) {
-		if strings.HasPrefix(a, "--text=") && strings.Contains(a, `\`) {
-			t.Errorf("--text contains a backslash zenity would decode: %q", a)
+// rendered emulates how zenity shows an --entry --text value: g_strcompress
+// decodes C escapes, then the label treats "_" as a mnemonic marker.
+func rendered(arg string) string {
+	var c strings.Builder
+	for i := 0; i < len(arg); i++ {
+		if arg[i] != '\\' || i+1 == len(arg) {
+			c.WriteByte(arg[i])
+			continue
+		}
+		i++
+		switch e := arg[i]; {
+		case e >= '0' && e <= '7':
+			n, j := 0, i
+			for ; j < len(arg) && j < i+3 && arg[j] >= '0' && arg[j] <= '7'; j++ {
+				n = n*8 + int(arg[j]-'0')
+			}
+			c.WriteByte(byte(n))
+			i = j - 1
+		case strings.IndexByte("bfnrtv", e) >= 0:
+			c.WriteByte("\b\f\n\r\t\v"[strings.IndexByte("bfnrtv", e)])
+		default:
+			c.WriteByte(e)
 		}
 	}
-	if got := escapeMarkup(`a\0<&`); got != "a&#92;0&lt;&amp;" {
-		t.Errorf("escapeMarkup = %q", got)
+	s := c.String()
+	var m strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '_' && i+1 < len(s) {
+			i++
+		}
+		m.WriteByte(s[i])
+	}
+	return m.String()
+}
+
+func TestZenityTextRendersExactly(t *testing.T) {
+	p := testPrompt()
+	p.Request.ParentName = "bash"
+	p.Request.Prompt = `a\012b_c\\d\000e`
+	p.Request.ParentArgs = []string{"sudo", "-A", "sh", "-c", strings.Repeat("echo some_words; ", 30)}
+	var text string
+	for _, a := range zenityArgs(p, time.Now()) {
+		if v, ok := strings.CutPrefix(a, "--text="); ok {
+			text = rendered(v)
+		}
+	}
+	lines := strings.Split(text, "\n")
+	if !slices.Contains(lines, `Prompt: a\012b_c\\d\000e`) {
+		t.Errorf("prompt not shown literally:\n%s", text)
+	}
+	if !strings.HasPrefix(lines[1], "WARNING: askpass was not started by sudo") {
+		t.Errorf("warning is not first:\n%s", text)
+	}
+	commands := 0
+	for _, l := range lines {
+		if n := utf8.RuneCountInString(l); n > wrapWidth {
+			t.Errorf("line of %d runes: %q", n, l)
+		}
+		if strings.HasPrefix(l, "Command:") {
+			commands++
+		}
+	}
+	if commands != 1 {
+		t.Errorf("%d Command lines:\n%s", commands, text)
+	}
+	if !strings.Contains(strings.ReplaceAll(text, "\n    ", " "), "echo some_words; echo some_words;") {
+		t.Errorf("wrapped command lost text:\n%s", text)
+	}
+}
+
+func TestWrap(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"short", "short"},
+		{"aaaa bbbb cccc", "aaaa\n  bbbb\n  cccc"},
+		{"aaaaaaaaaa", "aaaaaa\n  aaaa"},
+	} {
+		if got := wrap(tc.in, 6, "  "); got != tc.want {
+			t.Errorf("wrap(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
 func TestZenityArgs(t *testing.T) {
 	p := testPrompt()
-	p.Request.Host = "<b>evil</b>"
 	now := p.Deadline.Add(-42 * time.Second)
-	args := zenityArgs(p, now)
-	joined := strings.Join(args, "\x00")
-	for _, want := range []string{"--forms", "--add-password=Password", "--ok-label=Send", "--cancel-label=Deny", "--timeout=42"} {
+	joined := strings.Join(zenityArgs(p, now), "\x00")
+	for _, want := range []string{"--entry", "--hide-text", "--ok-label=Send", "--cancel-label=Deny", "--timeout=42"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("missing %s in %q", want, args)
-		}
-	}
-	for _, a := range args {
-		if strings.HasPrefix(a, "--text=") && strings.Contains(a, "<b>evil") {
-			t.Errorf("client markup not escaped: %q", a)
+			t.Errorf("missing %s in %q", want, joined)
 		}
 	}
 }

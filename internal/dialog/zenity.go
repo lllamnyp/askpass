@@ -78,24 +78,27 @@ func (z *Zenity) Ask(ctx context.Context, p *Prompt) ([]byte, error) {
 	return append([]byte(nil), out...), nil
 }
 
+// wrapWidth is where dialog lines are broken: zenity's labels don't wrap.
+const wrapWidth = 72
+
 func zenityArgs(p *Prompt, now time.Time) []string {
-	var text strings.Builder
-	text.WriteString("<b>sudo password requested</b>\n")
+	var warnings, details []string
 	for _, l := range p.Lines() {
-		line := fmt.Sprintf("<b>%s:</b> %s", escapeMarkup(l[0]), escapeMarkup(l[1]))
+		line := wrap(l[0]+": "+l[1], wrapWidth, "    ")
 		if l[0] == "WARNING" {
-			line = `<span foreground="red">` + line + `</span>`
+			warnings = append(warnings, line)
+		} else {
+			details = append(details, line)
 		}
-		text.WriteString("\n" + line)
 	}
+	text := strings.Join(append(append([]string{"sudo password requested"}, warnings...), details...), "\n")
 	args := []string{
-		"--forms",
+		"--entry",
+		"--hide-text",
 		"--title=askpass: sudo on " + sanitize(p.Request.Host),
-		"--text=" + text.String(),
-		"--add-password=Password",
+		"--text=" + escapeLabel(text),
 		"--ok-label=Send",
 		"--cancel-label=Deny",
-		"--width=560",
 	}
 	if !p.Deadline.IsZero() {
 		secs := max(int(p.Deadline.Sub(now).Seconds()), 1)
@@ -104,12 +107,31 @@ func zenityArgs(p *Prompt, now time.Time) []string {
 	return args
 }
 
-// markupEscaper escapes text for zenity --text, which zenity first passes
-// through g_strcompress (decoding C escapes such as \n and \000) and then
-// renders as Pango markup. Backslashes become a character reference so no
-// escape sequence survives to be decoded.
-var markupEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;", `\`, "&#92;")
+// wrap breaks s into lines of at most width runes, at spaces where possible,
+// prefixing continuation lines with indent.
+func wrap(s string, width int, indent string) string {
+	var lines []string
+	r := []rune(s)
+	for limit := width; len(r) > limit; limit = width - len([]rune(indent)) {
+		cut := limit
+		for i := limit; i > limit/2; i-- {
+			if r[i] == ' ' {
+				cut = i
+				break
+			}
+		}
+		lines = append(lines, string(r[:cut]))
+		r = []rune(strings.TrimLeft(string(r[cut:]), " "))
+	}
+	lines = append(lines, string(r))
+	return strings.Join(lines, "\n"+indent)
+}
 
-func escapeMarkup(s string) string {
-	return markupEscaper.Replace(s)
+// labelEscaper escapes text for zenity --entry --text, which zenity passes
+// through g_strcompress (decoding C escapes such as \n and \000) and then
+// shows as a plain label where "_" marks a mnemonic.
+var labelEscaper = strings.NewReplacer(`\`, `\\`, "_", "__")
+
+func escapeLabel(s string) string {
+	return labelEscaper.Replace(s)
 }

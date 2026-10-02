@@ -110,8 +110,7 @@ askpass.
   a real zenity dialog or real sudo. Check:
   - sudo's effective UID is 0 while askpass runs, so genuine requests don't
     show the WARNING line.
-  - The zenity forms dialog wraps long text and appears in front on GNOME
-    Wayland.
+  - The zenity dialog appears in front on GNOME Wayland.
   - The systemd user unit sees `WAYLAND_DISPLAY`.
 - **Revocation.** A serial-number denylist on the server, so one client
   certificate can be revoked without rebuilding the CA.

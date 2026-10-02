@@ -196,29 +196,33 @@ so that a slow answer is reported as a server-side timeout.
 
 ```
 sudo password requested
-
-Host:      my-vps (certificate "my-vps" from 10.99.0.1:51234)
-User:      agent (uid 1000)
-Command:   sudo -A apt install jq
-Run from:  bash -c 'sudo -A apt install jq'
+Host: my-vps (certificate "my-vps" from 10.99.0.1:51234)
+User: agent (uid 1000)
+Command: sudo -A apt install jq
+Run from: bash -c 'sudo -A apt install jq'
 Directory: /home/agent/project
-Prompt:    [sudo] password for agent:
-Expires:   14:03:27
+Prompt: [sudo] password for agent:
+Expires: 14:03:27
+[••••••••••••]
                                         [Deny] [Send]
 ```
+
+The dialog is a `zenity --entry --hide-text` box: type the password and press
+Enter or **Send**. Lines longer than 72 characters wrap, with an indent.
 
 - **Host** is what the client reports. The certificate name and source
   address next to it are the only fields the server verified itself.
 - **Command** is the command line of askpass's parent process, normally sudo,
   so it is the command being elevated.
 - **Run from** is the command line of whatever ran sudo.
-- A red **WARNING** line appears when askpass's parent isn't a root-owned
-  `sudo` process, meaning something ran askpass directly to read the password.
-  Deny those unless you did it yourself.
-- Client-supplied text is shown on single lines, with control and
-  bidirectional-override characters escaped and Pango markup and backslash
-  escapes neutralised, so a request can't fake extra lines in the dialog.
-- Command lines longer than 1000 characters are cut, and a red WARNING line
+- A **WARNING** line appears first, right under the heading, when askpass's
+  parent isn't a root-owned `sudo` process, meaning something ran askpass
+  directly to read the password. Deny those unless you did it yourself.
+- Client-supplied text is shown as plain text, never markup. Control and
+  bidirectional-override characters are escaped, and so are the backslash
+  escapes and `_` mnemonics zenity would otherwise decode, so a request can't
+  fake extra lines in the dialog.
+- Command lines longer than 1000 characters are cut, and a WARNING line
   says how much is hidden. Deny those unless you know what they are.
 - Pressing **Send** with an empty field counts as **Deny**.
 
