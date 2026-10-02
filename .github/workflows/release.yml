@@ -1,0 +1,33 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Build static binaries
+        run: |
+          for arch in amd64 arm64; do
+            for cmd in askpass askpass-server; do
+              CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+                go build -trimpath -ldflags="-s -w -X main.version=$GITHUB_REF_NAME" \
+                -o "dist/$cmd-linux-$arch" "./cmd/$cmd"
+            done
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+      - name: Create release
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

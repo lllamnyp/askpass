@@ -32,7 +32,12 @@ There are two static binaries:
 
 ## Build
 
-Requires Go 1.26.4 or newer.
+Tagged versions ship static linux amd64 and arm64 binaries of both programs,
+with a `SHA256SUMS` file, on the
+[releases page](https://github.com/lllamnyp/askpass/releases). Pushing a `v*`
+tag builds and publishes them.
+
+To build from source you need Go 1.26.4 or newer.
 
 ```sh
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/ ./cmd/...
