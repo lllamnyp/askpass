@@ -1,7 +1,10 @@
 package pki
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"net"
 	"os"
@@ -107,6 +110,17 @@ func TestSignCSR(t *testing.T) {
 	}
 	if cn := parseCert(t, certPEM).Subject.CommonName; cn != "renamed" {
 		t.Errorf("CN override ignored: %q", cn)
+	}
+	weak, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "weak"}}, weak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ca.SignClientCSR(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), "", time.Hour); err == nil {
+		t.Error("CSR with a 1024-bit RSA key signed")
 	}
 	if _, err := ca.SignClientCSR([]byte("garbage"), "", time.Hour); err == nil {
 		t.Error("garbage CSR signed")

@@ -77,6 +77,8 @@ func main() {
 	}
 }
 
+// defaultDir is $ASKPASS_SERVER_DIR, else $XDG_CONFIG_HOME/askpass-server,
+// else ~/.config/askpass-server, or "" if none can be determined.
 func defaultDir() string {
 	if d := os.Getenv("ASKPASS_SERVER_DIR"); d != "" {
 		return d
@@ -84,17 +86,26 @@ func defaultDir() string {
 	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
 		return filepath.Join(d, "askpass-server")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "askpass-server"
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config", "askpass-server")
 	}
-	return filepath.Join(home, ".config", "askpass-server")
+	return ""
 }
 
 func newFlags(name string) (*flag.FlagSet, *string) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	dir := fs.String("dir", defaultDir(), "directory holding the CA and server certificate (env ASKPASS_SERVER_DIR)")
 	return fs, dir
+}
+
+func parse(fs *flag.FlagSet, dir *string, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" {
+		return errors.New("cannot determine the home directory; pass -dir or set ASKPASS_SERVER_DIR")
+	}
+	return nil
 }
 
 func paths(dir, name string) (cert, key string) {
@@ -106,7 +117,7 @@ func serve(args []string) error {
 	listen := fs.String("listen", defaultListen, "address to listen on")
 	timeout := fs.Duration("timeout", server.DefaultTimeout, "how long a request waits for an answer")
 	zenity := fs.String("zenity", "zenity", "zenity executable")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, dir, args); err != nil {
 		return err
 	}
 	if err := harden.Process(); err != nil {
@@ -140,7 +151,7 @@ func initCA(args []string) error {
 	fs, dir := newFlags("init-ca")
 	name := fs.String("name", "askpass CA", "CA common name")
 	validity := fs.Duration("validity", pki.CAValidity, "CA validity")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, dir, args); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(*dir, 0o700); err != nil {
@@ -171,7 +182,7 @@ func issueServer(args []string) error {
 	ips := fs.String("ip", strings.Split(defaultListen, ":")[0], "comma-separated IP addresses the certificate is valid for")
 	dns := fs.String("dns", "", "comma-separated DNS names the certificate is valid for")
 	validity := fs.Duration("validity", pki.LeafValidity, "certificate validity")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, dir, args); err != nil {
 		return err
 	}
 	ca, err := loadCA(*dir)
@@ -207,7 +218,7 @@ func issueClient(args []string) error {
 	out := fs.String("out", "", "bundle directory to create (default ./askpass-<name>)")
 	srv := fs.String("server", defaultListen, "server address written into the bundle's config")
 	validity := fs.Duration("validity", pki.LeafValidity, "certificate validity")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, dir, args); err != nil {
 		return err
 	}
 	if *name == "" {
@@ -252,7 +263,7 @@ func signCSR(args []string) error {
 	out := fs.String("out", "client.crt", "certificate file to write")
 	name := fs.String("name", "", "override the common name requested in the CSR")
 	validity := fs.Duration("validity", pki.LeafValidity, "certificate validity")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, dir, args); err != nil {
 		return err
 	}
 	if *csrPath == "" {

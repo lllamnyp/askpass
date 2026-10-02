@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -230,10 +231,11 @@ func TestDialogsSerialized(t *testing.T) {
 		return []byte("pw"), nil
 	}}
 	addr := start(t, p.server(t, "127.0.0.1"), pr, time.Minute)
-	cfg := p.client(t, "vps", p)
 
 	var wg sync.WaitGroup
-	for range 4 {
+	for i := range 4 {
+		// Separate clients, to stay under the per-client pending limit.
+		cfg := p.client(t, fmt.Sprintf("vps%d", i), p)
 		wg.Go(func() {
 			if _, err := ask(t, cfg, addr); err != nil {
 				t.Error(err)
@@ -301,4 +303,127 @@ func TestUnreachableServer(t *testing.T) {
 	if _, err := ask(t, p.client(t, "vps", p), addr); err == nil {
 		t.Error("no error for unreachable server")
 	}
+}
+
+func TestPendingLimitPerClient(t *testing.T) {
+	p := newPKI(t)
+	release := make(chan struct{})
+	pr := &fakePrompter{fn: func(ctx context.Context, _ *dialog.Prompt) ([]byte, error) {
+		select {
+		case <-release:
+			return []byte("pw"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	addr := start(t, p.server(t, "127.0.0.1"), pr, time.Minute)
+	greedy := p.client(t, "greedy", p)
+
+	var wg sync.WaitGroup
+	for range maxPendingPerClient {
+		wg.Go(func() {
+			if _, err := ask(t, greedy, addr); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	waitFor(t, func() bool { return pr.calls.Load() == 1 })
+	// The first request shows its dialog and the others queue; wait for
+	// them all to register as pending.
+	time.Sleep(200 * time.Millisecond)
+
+	_, err := ask(t, greedy, addr)
+	if re, ok := errors.AsType[*client.RequestError](err); !ok || re.Reason != "too many pending requests" {
+		t.Errorf("over the limit: got %v", err)
+	}
+
+	// Another client is unaffected.
+	other := make(chan error, 1)
+	go func() { _, err := ask(t, p.client(t, "other", p), addr); other <- err }()
+
+	close(release)
+	wg.Wait()
+	if err := <-other; err != nil {
+		t.Errorf("other client: %v", err)
+	}
+}
+
+func TestShutdownCancelsOpenDialogs(t *testing.T) {
+	p := newPKI(t)
+	opened := make(chan struct{})
+	var closed atomic.Bool
+	pr := &fakePrompter{fn: func(ctx context.Context, _ *dialog.Prompt) ([]byte, error) {
+		close(opened)
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond)
+		closed.Store(true)
+		return nil, ctx.Err()
+	}}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{TLSConfig: p.server(t, "127.0.0.1"), Prompter: pr, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx, ln) }()
+
+	answer := make(chan error, 1)
+	go func() { _, err := ask(t, p.client(t, "vps", p), ln.Addr().String()); answer <- err }()
+	<-opened
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !closed.Load() {
+		t.Error("Serve returned before the open dialog was closed")
+	}
+	err = <-answer
+	if re, ok := errors.AsType[*client.RequestError](err); !ok || re.Status != protocol.StatusError {
+		t.Errorf("client: got %v, want a cancellation error", err)
+	}
+}
+
+// flakyListener fails its first Accept with a transient error.
+type flakyListener struct {
+	net.Listener
+	failed atomic.Bool
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	if !l.failed.Swap(true) {
+		return nil, errors.New("accept: too many open files")
+	}
+	return l.Listener.Accept()
+}
+
+func TestAcceptErrorsAreRetried(t *testing.T) {
+	p := newPKI(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{TLSConfig: p.server(t, "127.0.0.1"), Prompter: answer("pw"), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx, &flakyListener{Listener: ln}) }()
+
+	if _, err := ask(t, p.client(t, "vps", p), ln.Addr().String()); err != nil {
+		t.Errorf("request after a transient accept error: %v", err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Serve: %v", err)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatal("condition not reached")
 }

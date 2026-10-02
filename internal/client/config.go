@@ -108,9 +108,13 @@ func LoadConfig(dir string) (*Config, error) {
 	}
 	host, _, err := net.SplitHostPort(cfg.Server)
 	if err != nil {
-		// No port given.
-		host = cfg.Server
-		cfg.Server = net.JoinHostPort(cfg.Server, DefaultPort)
+		// Retry as a host without a port; anything still malformed (such
+		// as an unbracketed IPv6 address) is a config error.
+		host, _, err = net.SplitHostPort(cfg.Server + ":" + DefaultPort)
+		if err != nil {
+			return nil, fmt.Errorf("%s: invalid server %q: want host, host:port or [ipv6]:port", path, cfg.Server)
+		}
+		cfg.Server += ":" + DefaultPort
 	}
 	if cfg.ServerName == "" {
 		cfg.ServerName = host

@@ -71,6 +71,11 @@ func (z *Zenity) Ask(ctx context.Context, p *Prompt) ([]byte, error) {
 	if len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
 	}
+	if len(out) == 0 {
+		// Send with an empty field is almost always a stray Enter; relaying
+		// it would only cost a failed sudo attempt.
+		return nil, ErrDenied
+	}
 	return append([]byte(nil), out...), nil
 }
 
@@ -100,7 +105,12 @@ func zenityArgs(p *Prompt, now time.Time) []string {
 	return args
 }
 
-// escapeMarkup escapes text for Pango markup, which zenity --text renders.
+// markupEscaper escapes text for zenity --text, which zenity first passes
+// through g_strcompress (decoding C escapes such as \n and \000) and then
+// renders as Pango markup. Backslashes become a character reference so no
+// escape sequence survives to be decoded.
+var markupEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;", `\`, "&#92;")
+
 func escapeMarkup(s string) string {
-	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;").Replace(s)
+	return markupEscaper.Replace(s)
 }

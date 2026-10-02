@@ -199,12 +199,18 @@ Expires:   14:03:27
   `sudo` process, meaning something ran askpass directly to read the password.
   Deny those unless you did it yourself.
 - Client-supplied text is shown on single lines, with control and
-  bidirectional-override characters escaped and Pango markup neutralised, so
-  a request can't fake extra lines in the dialog.
+  bidirectional-override characters escaped and Pango markup and backslash
+  escapes neutralised, so a request can't fake extra lines in the dialog.
+- Command lines longer than 1000 characters are cut, and a red WARNING line
+  says how much is hidden. Deny those unless you know what they are.
+- Pressing **Send** with an empty field counts as **Deny**.
 
 Only one dialog is open at a time. Other requests wait their turn, and the
 wait counts against their timeout. If the client gives up (sudo was
-interrupted, or the client timed out), its dialog closes.
+interrupted, or the client timed out), its dialog closes. Each client
+certificate can have at most 3 requests open or queued; further ones are
+refused straight away. When the server stops, it closes any open dialog and
+tells the waiting clients.
 
 ## Security model
 
@@ -265,9 +271,12 @@ one dialog and one answer.
 - **No revocation list.** To revoke a client certificate, create a new CA in
   a fresh `-dir`, then reissue the server certificate and every remaining
   client certificate.
-- **No rate limiting.** A client holding a valid certificate can queue dialog
-  after dialog. Anyone on the private network can open TLS handshakes, but
-  those are dropped after 10 seconds without a valid certificate.
+- **Only coarse rate limiting.** A client holding a valid certificate can
+  keep up to 3 requests queued and so can raise dialog after dialog. Anyone
+  on the private network can open TLS handshakes. Those are dropped after 10
+  seconds without a valid certificate, and beyond 64 simultaneous
+  connections new ones are dropped. A flood can therefore crowd out
+  legitimate requests but does not stop the server.
 - **Who is "sudo" is checked by name and EUID.** The WARNING line relies on
   `/proc/<parent>/status` showing a process named `sudo` with effective UID 0.
   It catches accidental and casual direct use, not a deliberate forgery (see

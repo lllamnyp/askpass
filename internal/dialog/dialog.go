@@ -35,21 +35,30 @@ type Prompter interface {
 	Ask(ctx context.Context, p *Prompt) ([]byte, error)
 }
 
-// maxField bounds every client-supplied string shown in the dialog.
-const maxField = 300
+// maxField bounds every client-supplied string shown in the dialog except
+// command lines, which get the larger maxCommand.
+const (
+	maxField   = 300
+	maxCommand = 1000
+)
 
 // Lines renders the prompt as label/value pairs of sanitized plain text. Every
 // value is single-line, with control and formatting characters escaped, so a
 // client cannot forge extra lines or hide text.
 func (p *Prompt) Lines() [][2]string {
 	r := p.Request
+	command, commandHidden := formatArgs(r.ParentArgs, maxCommand)
+	invoker, invokerHidden := formatArgs(r.InvokerArgs, maxCommand)
 	lines := [][2]string{
 		{"Host", fmt.Sprintf("%s (certificate %q from %s)", sanitize(r.Host), sanitize(p.ClientName), p.RemoteAddr)},
 		{"User", fmt.Sprintf("%s (uid %d)", sanitize(r.User), r.UID)},
-		{"Command", FormatArgs(r.ParentArgs)},
-		{"Run from", FormatArgs(r.InvokerArgs)},
+		{"Command", command},
+		{"Run from", invoker},
 		{"Directory", sanitize(r.Cwd)},
 		{"Prompt", sanitize(r.Prompt)},
+	}
+	if commandHidden > 0 || invokerHidden > 0 {
+		lines = append(lines, [2]string{"WARNING", fmt.Sprintf("command lines truncated, %d characters not shown", commandHidden+invokerHidden)})
 	}
 	if !IsSudo(r) {
 		lines = append(lines, [2]string{"WARNING", fmt.Sprintf("askpass was not started by sudo (parent %s, euid %d)", sanitize(r.ParentName), r.ParentEUID)})
@@ -69,10 +78,18 @@ func IsSudo(r *protocol.Request) bool {
 	return (r.ParentName == "sudo" || r.ParentName == "sudo-rs") && r.ParentEUID == 0
 }
 
-// FormatArgs renders a command line as one sanitized, shell-quoted string.
+// FormatArgs renders a command line as one sanitized, shell-quoted string
+// of at most maxField characters.
 func FormatArgs(args []string) string {
+	s, _ := formatArgs(args, maxField)
+	return s
+}
+
+// formatArgs is FormatArgs with a custom limit; it also returns how many
+// characters were cut off.
+func formatArgs(args []string, limit int) (string, int) {
 	if len(args) == 0 {
-		return "(unknown)"
+		return "(unknown)", 0
 	}
 	parts := make([]string, len(args))
 	for i, a := range args {
@@ -81,21 +98,28 @@ func FormatArgs(args []string) string {
 		}
 		parts[i] = a
 	}
-	return sanitize(strings.Join(parts, " "))
+	return sanitizeN(strings.Join(parts, " "), limit)
 }
 
 // sanitize escapes control, format and invalid characters, and truncates
 // to maxField runes.
 func sanitize(s string) string {
+	out, _ := sanitizeN(s, maxField)
+	return out
+}
+
+// sanitizeN is sanitize with a custom limit; it also returns how many runes
+// of s were cut off.
+func sanitizeN(s string, limit int) (string, int) {
 	if s == "" {
-		return "(none)"
+		return "(none)", 0
 	}
 	var b strings.Builder
 	n := 0
 	for i, w := 0, 0; i < len(s); i += w {
-		if n == maxField {
+		if n == limit {
 			b.WriteString("…")
-			break
+			return b.String(), utf8.RuneCountInString(s[i:])
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
 		w = size
@@ -109,5 +133,5 @@ func sanitize(s string) string {
 		}
 		n++
 	}
-	return b.String()
+	return b.String(), 0
 }

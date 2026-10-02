@@ -32,6 +32,14 @@ func TestLoadConfig(t *testing.T) {
 		t.Errorf("paths: ca %q key %q", cfg.CA, cfg.Key)
 	}
 
+	cfg, err = LoadConfig(writeConfig(t, "server = [fd00::2]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server != "[fd00::2]:"+DefaultPort || cfg.ServerName != "fd00::2" {
+		t.Errorf("ipv6: server %q name %q", cfg.Server, cfg.ServerName)
+	}
+
 	cfg, err = LoadConfig(writeConfig(t, "server = laptop.lan:9000\nserver_name = askpass\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -47,6 +55,8 @@ func TestLoadConfigErrors(t *testing.T) {
 		"unknown key": "server = x\nport = 1\n",
 		"bad line":    "server x\n",
 		"bad timeout": "server = x\ntimeout = soon\n",
+		"bare ipv6":   "server = fd00::2\n",
+		"extra colon": "server = host:7676:x\n",
 	} {
 		if _, err := LoadConfig(writeConfig(t, body)); err == nil {
 			t.Errorf("%s: accepted", name)

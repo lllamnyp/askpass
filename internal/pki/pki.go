@@ -5,8 +5,10 @@ package pki
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -143,6 +145,9 @@ func (ca *CA) SignClientCSR(csrPEM []byte, commonName string, validity time.Dura
 	if err := csr.CheckSignature(); err != nil {
 		return nil, fmt.Errorf("CSR signature: %w", err)
 	}
+	if err := checkKey(csr.PublicKey); err != nil {
+		return nil, err
+	}
 	if commonName == "" {
 		commonName = csr.Subject.CommonName
 	}
@@ -150,6 +155,27 @@ func (ca *CA) SignClientCSR(csrPEM []byte, commonName string, validity time.Dura
 		return nil, errors.New("CSR has no common name; pass one explicitly")
 	}
 	return ca.sign(ca.leafTemplate(commonName, validity, x509.ExtKeyUsageClientAuth), csr.PublicKey)
+}
+
+// checkKey accepts ECDSA P-256/P-384/P-521, Ed25519 and RSA keys of at
+// least 2048 bits.
+func checkKey(pub crypto.PublicKey) error {
+	switch k := pub.(type) {
+	case *ecdsa.PublicKey:
+		switch k.Curve {
+		case elliptic.P256(), elliptic.P384(), elliptic.P521():
+			return nil
+		}
+		return fmt.Errorf("unsupported ECDSA curve %s", k.Curve.Params().Name)
+	case ed25519.PublicKey:
+		return nil
+	case *rsa.PublicKey:
+		if k.N.BitLen() < 2048 {
+			return fmt.Errorf("RSA key too short (%d bits, need 2048)", k.N.BitLen())
+		}
+		return nil
+	}
+	return fmt.Errorf("unsupported public key type %T", pub)
 }
 
 // NewClientKeyAndCSR generates a client key and a CSR for it, so the key can

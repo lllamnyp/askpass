@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/lllamnyp/askpass/internal/dialog"
@@ -21,6 +22,14 @@ const DefaultTimeout = 60 * time.Second
 // ioTimeout bounds the handshake, reading the request and writing the answer.
 const ioTimeout = 10 * time.Second
 
+const (
+	// maxConns caps simultaneous connections, authenticated or not.
+	maxConns = 64
+	// maxPendingPerClient caps the requests one client certificate may have
+	// waiting for or showing a dialog.
+	maxPendingPerClient = 3
+)
+
 // Server answers askpass requests. Dialogs are shown one at a time.
 type Server struct {
 	TLSConfig *tls.Config
@@ -28,11 +37,14 @@ type Server struct {
 	Timeout   time.Duration
 	Logger    *slog.Logger
 
-	slot chan struct{}
+	slot    chan struct{}
+	mu      sync.Mutex
+	pending map[string]int
 }
 
-// Serve accepts connections on ln until ctx is cancelled. ln must be a plain
-// listener; Serve performs the TLS handshake itself.
+// Serve accepts connections on ln until ctx is cancelled, then waits for
+// open requests to be cancelled and answered. ln must be a plain listener;
+// Serve performs the TLS handshake itself.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	if s.TLSConfig == nil || s.TLSConfig.ClientAuth != tls.RequireAndVerifyClientCert {
 		return errors.New("server TLS config must require and verify client certificates")
@@ -44,21 +56,47 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		s.Logger = slog.Default()
 	}
 	s.slot = make(chan struct{}, 1)
+	s.pending = make(map[string]int)
 
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	stop := context.AfterFunc(ctx, func() { ln.Close() })
 	defer stop()
+
+	conns := make(chan struct{}, maxConns)
+	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
+			if errors.Is(err, net.ErrClosed) {
+				return err
 			}
-			return err
+			// Transient, such as running out of file descriptors: back off
+			// and keep serving.
+			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			s.Logger.Warn("accept failed", "err", err, "retry_in", delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil
+			}
+			continue
 		}
-		go s.handle(ctx, conn)
+		delay = 0
+		select {
+		case conns <- struct{}{}:
+		default:
+			s.Logger.Warn("too many connections, dropping", "remote", conn.RemoteAddr().String())
+			conn.Close()
+			continue
+		}
+		wg.Go(func() {
+			defer func() { <-conns }()
+			s.handle(ctx, conn)
+		})
 	}
 }
 
@@ -81,6 +119,12 @@ func (s *Server) handle(ctx context.Context, raw net.Conn) {
 		_ = protocol.WriteResponse(conn, protocol.StatusError, []byte("bad request"))
 		return
 	}
+	if !s.addPending(clientName, 1) {
+		log.Warn("too many pending requests from this client")
+		_ = protocol.WriteResponse(conn, protocol.StatusError, []byte("too many pending requests"))
+		return
+	}
+	defer s.addPending(clientName, -1)
 	log.Info("password requested", "host", req.Host, "user", req.User, "command", dialog.FormatArgs(req.ParentArgs))
 
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
@@ -115,6 +159,23 @@ func (s *Server) handle(ctx context.Context, raw net.Conn) {
 		return
 	}
 	_ = conn.CloseWrite()
+}
+
+// addPending adjusts the pending request count for a client. It refuses an
+// increment past maxPendingPerClient.
+func (s *Server) addPending(client string, delta int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.pending[client] + delta
+	if delta > 0 && n > maxPendingPerClient {
+		return false
+	}
+	if n == 0 {
+		delete(s.pending, client)
+	} else {
+		s.pending[client] = n
+	}
+	return true
 }
 
 // ask waits for the dialog slot, then prompts. On success the payload is
