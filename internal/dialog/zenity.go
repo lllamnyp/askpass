@@ -78,11 +78,11 @@ func zenityArgs(p *Prompt, now time.Time) []string {
 	var text strings.Builder
 	text.WriteString("<b>sudo password requested</b>\n")
 	for _, l := range p.Lines() {
-		label := escapeMarkup(l[0])
+		line := fmt.Sprintf("<b>%s:</b> %s", escapeMarkup(l[0]), escapeMarkup(l[1]))
 		if l[0] == "WARNING" {
-			label = `<span foreground="red"><b>` + label + `</b></span>`
+			line = `<span foreground="red">` + line + `</span>`
 		}
-		fmt.Fprintf(&text, "\n<b>%s:</b> %s", label, escapeMarkup(l[1]))
+		text.WriteString("\n" + line)
 	}
 	args := []string{
 		"--forms",

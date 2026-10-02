@@ -46,8 +46,8 @@ func (p *Prompt) Lines() [][2]string {
 	lines := [][2]string{
 		{"Host", fmt.Sprintf("%s (certificate %q from %s)", sanitize(r.Host), sanitize(p.ClientName), p.RemoteAddr)},
 		{"User", fmt.Sprintf("%s (uid %d)", sanitize(r.User), r.UID)},
-		{"Command", joinArgs(r.ParentArgs)},
-		{"Run from", joinArgs(r.InvokerArgs)},
+		{"Command", FormatArgs(r.ParentArgs)},
+		{"Run from", FormatArgs(r.InvokerArgs)},
 		{"Directory", sanitize(r.Cwd)},
 		{"Prompt", sanitize(r.Prompt)},
 	}
@@ -69,7 +69,8 @@ func IsSudo(r *protocol.Request) bool {
 	return (r.ParentName == "sudo" || r.ParentName == "sudo-rs") && r.ParentEUID == 0
 }
 
-func joinArgs(args []string) string {
+// FormatArgs renders a command line as one sanitized, shell-quoted string.
+func FormatArgs(args []string) string {
 	if len(args) == 0 {
 		return "(unknown)"
 	}

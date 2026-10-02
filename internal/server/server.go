@@ -81,8 +81,7 @@ func (s *Server) handle(ctx context.Context, raw net.Conn) {
 		_ = protocol.WriteResponse(conn, protocol.StatusError, []byte("bad request"))
 		return
 	}
-	log = log.With("host", req.Host, "user", req.User, "command", req.ParentArgs)
-	log.Info("password requested")
+	log.Info("password requested", "host", req.Host, "user", req.User, "command", dialog.FormatArgs(req.ParentArgs))
 
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()

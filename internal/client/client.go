@@ -34,9 +34,8 @@ func Ask(ctx context.Context, tlsConfig *tls.Config, addr string, req *protocol.
 	}
 	conn := c.(*tls.Conn)
 	defer conn.Close()
-	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
-	}
+	// Closing the connection when ctx ends unblocks any pending I/O, and
+	// wrapCtx then reports ctx's error.
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 
