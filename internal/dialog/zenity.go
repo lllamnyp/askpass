@@ -13,7 +13,9 @@ import (
 	"github.com/lllamnyp/askpass/internal/protocol"
 )
 
-// Zenity prompts with a GTK zenity forms dialog holding one password field.
+// Zenity prompts with zenity: first a read-only text window showing the
+// script or long command line that ran sudo, if there is one, then a dialog
+// with the request's details and a hidden password field.
 type Zenity struct {
 	// Path is the zenity executable; empty means "zenity" from PATH.
 	Path string
@@ -21,10 +23,22 @@ type Zenity struct {
 
 // Ask implements Prompter.
 func (z *Zenity) Ask(ctx context.Context, p *Prompt) ([]byte, error) {
+	if err := CheckRequest(p.Request); err != nil {
+		return nil, err
+	}
 	path := z.Path
 	if path == "" {
 		path = "zenity"
 	}
+	if review := DescribeInvoker(p.Request.InvokerArgs).Review; review != "" {
+		cmd := exec.CommandContext(ctx, path, reviewArgs(p, time.Now())...)
+		cmd.WaitDelay = 2 * time.Second
+		cmd.Stdin = strings.NewReader(review + "\n")
+		if err := exitError(ctx, cmd.Run()); err != nil {
+			return nil, err
+		}
+	}
+
 	cmd := exec.CommandContext(ctx, path, zenityArgs(p, time.Now())...)
 	cmd.WaitDelay = 2 * time.Second
 	stdout, err := cmd.StdoutPipe()
@@ -44,22 +58,8 @@ func (z *Zenity) Ask(ctx context.Context, p *Prompt) ([]byte, error) {
 		// Too long to be a password we can relay; drain and fail.
 		_, _ = io.Copy(io.Discard, stdout)
 	}
-	waitErr := cmd.Wait()
-
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, ctxErr
-	}
-	if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
-		switch exitErr.ExitCode() {
-		case 1:
-			return nil, ErrDenied
-		case 5:
-			return nil, context.DeadlineExceeded
-		}
-		return nil, fmt.Errorf("zenity failed: %w", waitErr)
-	}
-	if waitErr != nil {
-		return nil, fmt.Errorf("zenity failed: %w", waitErr)
+	if err := exitError(ctx, cmd.Wait()); err != nil {
+		return nil, err
 	}
 	if readErr == nil {
 		return nil, errors.New("password too long")
@@ -76,6 +76,48 @@ func (z *Zenity) Ask(ctx context.Context, p *Prompt) ([]byte, error) {
 		return nil, ErrDenied
 	}
 	return append([]byte(nil), out...), nil
+}
+
+// exitError maps how a zenity run ended to Ask's errors.
+func exitError(ctx context.Context, waitErr error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
+		switch exitErr.ExitCode() {
+		case 1:
+			return ErrDenied
+		case 5:
+			return context.DeadlineExceeded
+		}
+	}
+	if waitErr != nil {
+		return fmt.Errorf("zenity failed: %w", waitErr)
+	}
+	return nil
+}
+
+// reviewArgs shows the text read from stdin in a read-only, selectable text
+// view. Unlike --entry --text, it is shown verbatim, with no escape decoding.
+func reviewArgs(p *Prompt, now time.Time) []string {
+	args := []string{
+		"--text-info",
+		"--title=askpass: review what ran sudo on " + sanitize(p.Request.Host),
+		"--font=monospace",
+		"--width=900",
+		"--height=600",
+		"--ok-label=Continue",
+		"--cancel-label=Deny",
+	}
+	return append(args, timeoutArgs(p, now)...)
+}
+
+func timeoutArgs(p *Prompt, now time.Time) []string {
+	if p.Deadline.IsZero() {
+		return nil
+	}
+	secs := max(int(p.Deadline.Sub(now).Seconds()), 1)
+	return []string{"--timeout=" + strconv.Itoa(secs)}
 }
 
 // wrapWidth is where dialog lines are broken: zenity's labels don't wrap.
@@ -100,11 +142,7 @@ func zenityArgs(p *Prompt, now time.Time) []string {
 		"--ok-label=Send",
 		"--cancel-label=Deny",
 	}
-	if !p.Deadline.IsZero() {
-		secs := max(int(p.Deadline.Sub(now).Seconds()), 1)
-		args = append(args, "--timeout="+strconv.Itoa(secs))
-	}
-	return args
+	return append(args, timeoutArgs(p, now)...)
 }
 
 // wrap breaks s into lines of at most width runes, at spaces where possible,

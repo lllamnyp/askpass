@@ -44,21 +44,21 @@ const (
 
 // Lines renders the prompt as label/value pairs of sanitized plain text. Every
 // value is single-line, with control and formatting characters escaped, so a
-// client cannot forge extra lines or hide text.
+// client cannot forge extra lines or hide text. A long or scripted "Run from"
+// is only summarised here; DescribeInvoker gives its full text.
 func (p *Prompt) Lines() [][2]string {
 	r := p.Request
 	command, commandHidden := formatArgs(r.ParentArgs, maxCommand)
-	invoker, invokerHidden := formatArgs(r.InvokerArgs, maxCommand)
 	lines := [][2]string{
 		{"Host", fmt.Sprintf("%s (certificate %q from %s)", sanitize(r.Host), sanitize(p.ClientName), p.RemoteAddr)},
 		{"User", fmt.Sprintf("%s (uid %d)", sanitize(r.User), r.UID)},
 		{"Command", command},
-		{"Run from", invoker},
+		{"Run from", DescribeInvoker(r.InvokerArgs).Summary},
 		{"Directory", sanitize(r.Cwd)},
 		{"Prompt", sanitize(r.Prompt)},
 	}
-	if commandHidden > 0 || invokerHidden > 0 {
-		lines = append(lines, [2]string{"WARNING", fmt.Sprintf("command lines truncated, %d characters not shown", commandHidden+invokerHidden)})
+	if commandHidden > 0 {
+		lines = append(lines, [2]string{"WARNING", fmt.Sprintf("command truncated, %d characters not shown", commandHidden)})
 	}
 	if !IsSudo(r) {
 		lines = append(lines, [2]string{"WARNING", fmt.Sprintf("askpass was not started by sudo (parent %s, euid %d)", sanitize(r.ParentName), r.ParentEUID)})
@@ -86,8 +86,14 @@ func FormatArgs(args []string) string {
 	return s
 }
 
-// formatArgs is FormatArgs with a custom limit; it also returns how many
-// characters were cut off.
+// FormatArgsFull is FormatArgs without the length limit.
+func FormatArgsFull(args []string) string {
+	s, _ := formatArgs(args, -1)
+	return s
+}
+
+// formatArgs is FormatArgs with a custom limit, or none if limit < 0; it
+// also returns how many characters were cut off.
 func formatArgs(args []string, limit int) (string, int) {
 	if len(args) == 0 {
 		return "(unknown)", 0
@@ -109,12 +115,18 @@ func sanitize(s string) string {
 	return out
 }
 
-// sanitizeN is sanitize with a custom limit; it also returns how many runes
-// of s were cut off.
+// sanitizeN is sanitize with a custom limit, or none if limit < 0; it also
+// returns how many runes of s were cut off.
 func sanitizeN(s string, limit int) (string, int) {
 	if s == "" {
 		return "(none)", 0
 	}
+	return escape(s, limit, false)
+}
+
+// escape escapes control, format and invalid characters in s, keeping "\n"
+// as is if keepNewline, and cuts s after limit runes unless limit < 0.
+func escape(s string, limit int, keepNewline bool) (string, int) {
 	var b strings.Builder
 	n := 0
 	for i, w := 0, 0; i < len(s); i += w {
@@ -125,6 +137,8 @@ func sanitizeN(s string, limit int) (string, int) {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		w = size
 		switch {
+		case r == '\n' && keepNewline:
+			b.WriteRune(r)
 		case r == utf8.RuneError && size == 1:
 			fmt.Fprintf(&b, `\x%02x`, s[i])
 		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r):

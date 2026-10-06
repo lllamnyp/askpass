@@ -255,3 +255,67 @@ func TestZenityAsk(t *testing.T) {
 		t.Errorf("dialog not killed on timeout (took %v)", d)
 	}
 }
+
+func TestZenityReviewStep(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	// The fake records each dialog: its first argument, and its stdin for
+	// the review window.
+	fake := func(review string) *Zenity {
+		return fakeZenity(t, `echo "$1" >> `+dir+`/calls
+case "$1" in
+--text-info) cat > `+dir+`/review; `+review+`;;
+*) echo pw;;
+esac`)
+	}
+	calls := func() string {
+		b, _ := os.ReadFile(filepath.Join(dir, "calls"))
+		os.Remove(filepath.Join(dir, "calls"))
+		return string(b)
+	}
+
+	p := testPrompt()
+	p.Request.InvokerArgs = claudeCodeWrap("sudo -A apt-get update\nsudo -A apt-get install -y make\n")
+	pw, err := fake("exit 0").Ask(ctx, p)
+	if err != nil || string(pw) != "pw" {
+		t.Errorf("review then send: got %q, %v", pw, err)
+	}
+	if got := calls(); got != "--text-info\n--entry\n" {
+		t.Errorf("dialogs shown: %q", got)
+	}
+	review, _ := os.ReadFile(filepath.Join(dir, "review"))
+	if want := DescribeInvoker(p.Request.InvokerArgs).Review + "\n"; string(review) != want {
+		t.Errorf("review window got %q, want %q", review, want)
+	}
+
+	for code, want := range map[string]error{"exit 1": ErrDenied, "exit 5": context.DeadlineExceeded} {
+		if _, err := fake(code).Ask(ctx, p); !errors.Is(err, want) {
+			t.Errorf("review %s: got %v, want %v", code, err, want)
+		}
+		if got := calls(); got != "--text-info\n" {
+			t.Errorf("review %s: dialogs shown %q", code, got)
+		}
+	}
+
+	p.Request.InvokerArgs = []string{"-bash"}
+	if _, err := fake("exit 0").Ask(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if got := calls(); got != "--entry\n" {
+		t.Errorf("short invoker: dialogs shown %q", got)
+	}
+}
+
+func TestReviewArgs(t *testing.T) {
+	p := testPrompt()
+	now := p.Deadline.Add(-42 * time.Second)
+	joined := strings.Join(reviewArgs(p, now), "\x00")
+	for _, want := range []string{"--text-info", "--ok-label=Continue", "--cancel-label=Deny", "--timeout=42"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %s in %q", want, joined)
+		}
+	}
+	if strings.Contains(joined, "--editable") {
+		t.Error("review window is editable")
+	}
+}
