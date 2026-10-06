@@ -199,12 +199,29 @@ so that a slow answer is reported as a server-side timeout.
 
 ## What the dialog shows
 
+When sudo was run from a shell script, such as an agent's tool call, a
+review window opens first. It shows the whole script as written, in a
+scrollable, read-only text view whose text can be selected and copied:
+
+```
+Claude Code Bash tool (sources /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh), script:
+
+sudo -A apt-get update
+sudo -A apt-get install -y make
+                                    [Deny] [Continue]
+```
+
+**Continue** leads to the password dialog; **Deny** ends the request. A
+script approved here can usually run all its `sudo` lines on one password,
+because sudo caches the credential (see below). The password dialog follows,
+or comes alone when there is nothing to review:
+
 ```
 sudo password requested
 Host: my-vps (certificate "my-vps" from 10.99.0.1:51234)
 User: agent (uid 1000)
-Command: sudo -A apt install jq
-Run from: bash -c 'sudo -A apt install jq'
+Command: sudo -A apt-get update
+Run from: Claude Code Bash tool, script in the review window
 Directory: /home/agent/project
 Prompt: [sudo] password for agent:
 Expires: 14:03:27
@@ -219,17 +236,29 @@ Enter or **Send**. Lines longer than 72 characters wrap, with an indent.
   address next to it are the only fields the server verified itself.
 - **Command** is the command line of askpass's parent process, normally sudo,
   so it is the command being elevated.
-- **Run from** is the command line of whatever ran sudo.
+- **Run from** is the command line of whatever ran sudo. A short one is shown
+  in place. For `sh`, `bash`, `zsh` or `dash` with `-c`, the script goes to
+  the review window, decoded rather than shell-quoted. So does any other
+  command line longer than 300 characters.
+- Claude Code runs every Bash tool command inside a wrapper that sources a
+  shell snapshot and records the working directory. When the script matches
+  that wrapper exactly, the review window names the snapshot and shows only
+  the command inside. Anything else is shown in full as a plain script.
 - A **WARNING** line appears first, right under the heading, when askpass's
   parent isn't a root-owned `sudo` process, meaning something ran askpass
   directly to read the password. Deny those unless you did it yourself.
 - Client-supplied text is shown as plain text, never markup. Control and
-  bidirectional-override characters are escaped, and so are the backslash
-  escapes and `_` mnemonics zenity would otherwise decode, so a request can't
-  fake extra lines in the dialog.
-- Command lines longer than 1000 characters are cut, and a WARNING line
+  bidirectional-override characters are escaped (the review window keeps
+  newlines), and so are the backslash escapes and `_` mnemonics zenity would
+  otherwise decode, so a request can't fake extra lines in the dialog.
+- **Run from** is never cut. A request whose Run from is longer than 32 KiB
+  is refused without a dialog, and the client is told why.
+- **Command** lines longer than 1000 characters are cut, and a WARNING line
   says how much is hidden. Deny those unless you know what they are.
 - Pressing **Send** with an empty field counts as **Deny**.
+
+The server logs every request's Command (up to 300 characters) and its full
+Run from, each on one line with control characters escaped.
 
 Only one dialog is open at a time. Other requests wait their turn, and the
 wait counts against their timeout. If the client gives up (sudo was
@@ -328,9 +357,9 @@ The tests cover everything except a real dialog and a real sudo:
 - the wire format and its limits
 - certificate issuance and verification, including wrong CA, wrong address
   and wrong usage
-- sanitising of dialog text
-- the zenity exec path (send, deny, zenity timeout, kill on deadline,
-  oversized output), driven by a shell script standing in for zenity
+- sanitising of dialog text, and decoding of shell and Claude Code scripts
+- the zenity exec path (review window, send, deny, zenity timeout, kill on
+  deadline, oversized output), driven by a shell script standing in for zenity
 - full mTLS exchanges over loopback: relay, deny, timeout, client hangup,
   serialised dialogs, no caching, and rejection of foreign or missing
   certificates

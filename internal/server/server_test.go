@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -426,4 +427,73 @@ func waitFor(t *testing.T, cond func() bool) {
 		}
 	}
 	t.Fatal("condition not reached")
+}
+
+// lockedBuffer is an io.Writer safe for the server's goroutines to log to.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.b = append(l.b, p...)
+	return len(p), nil
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return string(l.b)
+}
+
+func TestRunFromLoggedAndLimited(t *testing.T) {
+	p := newPKI(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var logs lockedBuffer
+	pr := answer("pw")
+	s := &Server{TLSConfig: p.server(t, "127.0.0.1"), Prompter: pr, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx, ln) }()
+	cfg := p.client(t, "vps", p)
+	send := func(invoker []string) error {
+		req := request()
+		req.InvokerArgs = invoker
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := client.Ask(ctx, cfg, ln.Addr().String(), req)
+		return err
+	}
+
+	script := "sudo -A apt-get update\n" + strings.Repeat("echo padding; ", 100) + "sudo -A make install"
+	if err := send([]string{"bash", "-c", script}); err != nil {
+		t.Fatal(err)
+	}
+	var requested string
+	for line := range strings.Lines(logs.String()) {
+		if strings.Contains(line, "password requested") {
+			requested = line
+		}
+	}
+	if !strings.Contains(requested, `sudo -A apt-get update\\u000aecho padding;`) || !strings.Contains(requested, "sudo -A make install") {
+		t.Errorf("run_from not logged in full on one line: %q", requested)
+	}
+
+	err = send([]string{"bash", "-c", strings.Repeat("x", dialog.MaxInvoker+1)})
+	if re, ok := errors.AsType[*client.RequestError](err); !ok || re.Status != protocol.StatusDenied || !strings.Contains(re.Reason, "too long") {
+		t.Errorf("over-limit request: got %v", err)
+	}
+	if n := pr.calls.Load(); n != 1 {
+		t.Errorf("prompted %d times, want only for the request within the limit", n)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Serve: %v", err)
+	}
 }

@@ -114,5 +114,5 @@ askpass.
   - The systemd user unit sees `WAYLAND_DISPLAY`.
 - **Revocation.** A serial-number denylist on the server, so one client
   certificate can be revoked without rebuilding the CA.
-- **Dialog details.** A way to see a truncated command in full, such as an
-  expandable text area, rather than only the truncation warning.
+- **Dialog details.** Show a Command longer than 1000 characters in the
+  review window too, as Run from already is, rather than cutting it.

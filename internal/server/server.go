@@ -125,7 +125,13 @@ func (s *Server) handle(ctx context.Context, raw net.Conn) {
 		return
 	}
 	defer s.addPending(clientName, -1)
-	log.Info("password requested", "host", req.Host, "user", req.User, "command", dialog.FormatArgs(req.ParentArgs))
+	log.Info("password requested", "host", req.Host, "user", req.User, "command", dialog.FormatArgs(req.ParentArgs),
+		"run_from", dialog.FormatArgsFull(req.InvokerArgs))
+	if err := dialog.CheckRequest(req); err != nil {
+		log.Warn("request refused", "err", err)
+		_ = protocol.WriteResponse(conn, protocol.StatusDenied, []byte(err.Error()))
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()
