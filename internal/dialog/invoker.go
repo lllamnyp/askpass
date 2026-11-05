@@ -46,14 +46,14 @@ var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true
 // Nothing is cut: callers must first refuse requests CheckRequest rejects.
 func DescribeInvoker(args []string) Invoker {
 	if prefix, script, rest, ok := shellScript(args); ok {
-		if source, stdin, body, ok := claudeCode(script); ok && len(rest) == 0 {
-			header := "Claude Code Bash tool (sources " + source
-			if stdin != "" {
-				header += ", stdin from " + stdin
+		if w, ok := claudeCode(script); ok && len(rest) == 0 {
+			header := "Claude Code Bash tool (sources " + w.source + "; unsets " + strings.Join(w.unsets, ", ")
+			if w.stdin != "" {
+				header += "; stdin from " + w.stdin
 			}
 			return Invoker{
 				Summary: "Claude Code Bash tool, script in the review window",
-				Review:  header + "), script:\n\n" + block(body),
+				Review:  header + "), script:\n\n" + block(w.body),
 			}
 		}
 		header, _ := formatArgs(prefix, -1)
@@ -131,29 +131,58 @@ func isLetters(s string) bool {
 }
 
 // The wrapper Claude Code's Bash tool runs every command in. This is Claude
-// Code's own format, not versioned or documented, and may change; anything
-// that doesn't match exactly is shown as a plain shell script instead.
+// Code's own format, not versioned or documented, and has already changed
+// once (it gained the unalias block for 'which').
+// Anything that doesn't match exactly is shown as a plain shell script.
 var (
-	claudePrefix = regexp.MustCompile(`^source ([A-Za-z0-9_./-]+) 2>/dev/null \|\| true && shopt -u extglob 2>/dev/null \|\| true && \{ \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; \} >/dev/null 2>&1 \|\| true && eval `)
+	claudeHead = regexp.MustCompile(`^source ([A-Za-z0-9_./-]+) 2>/dev/null \|\| true && shopt -u extglob 2>/dev/null \|\| true && `)
+	// Go regexps have no backreferences, so claudeCode checks that both
+	// names in a block are the same.
+	claudeUnset  = regexp.MustCompile(`^\{ \\builtin unalias -- '([A-Za-z_][A-Za-z0-9_]*)'; \\builtin unset -f -- '([A-Za-z_][A-Za-z0-9_]*)'; \} >/dev/null 2>&1 \|\| true && `)
 	claudeSuffix = regexp.MustCompile(`^(?: < (/dev/null))? && pwd -P >\| [A-Za-z0-9_./-]+/claude-[0-9a-f]+-cwd$`)
 )
 
-// claudeCode recognises a Claude Code Bash tool wrapper and returns the
-// snapshot it sources, the stdin redirect if any, and the command it evals.
-func claudeCode(script string) (source, stdin, body string, ok bool) {
-	m := claudePrefix.FindStringSubmatch(script)
+// claudeWrapper is what claudeCode found around the command.
+type claudeWrapper struct {
+	source string   // the snapshot it sources
+	unsets []string // the aliases and functions it removes, in order
+	stdin  string   // the stdin redirect, if any
+	body   string   // the command it evals
+}
+
+// claudeCode recognises a Claude Code Bash tool wrapper.
+func claudeCode(script string) (w claudeWrapper, ok bool) {
+	m := claudeHead.FindStringSubmatch(script)
 	if m == nil {
-		return "", "", "", false
+		return w, false
 	}
-	body, tail, ok := shellWord(script[len(m[0]):])
+	w.source = m[1]
+	s := script[len(m[0]):]
+	for {
+		u := claudeUnset.FindStringSubmatch(s)
+		if u == nil {
+			break
+		}
+		if u[1] != u[2] {
+			return w, false
+		}
+		w.unsets = append(w.unsets, u[1])
+		s = s[len(u[0]):]
+	}
+	s, ok = strings.CutPrefix(s, "eval ")
+	if len(w.unsets) == 0 || !ok {
+		return w, false
+	}
+	body, tail, ok := shellWord(s)
 	if !ok {
-		return "", "", "", false
+		return w, false
 	}
 	t := claudeSuffix.FindStringSubmatch(tail)
 	if t == nil {
-		return "", "", "", false
+		return w, false
 	}
-	return m[1], t[1], body, true
+	w.stdin, w.body = t[1], body
+	return w, true
 }
 
 // shellWord decodes a shell word made only of '…' runs and "'" pieces, the
