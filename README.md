@@ -204,7 +204,7 @@ review window opens first. It shows the whole script as written, in a
 scrollable, read-only text view whose text can be selected and copied:
 
 ```
-Claude Code Bash tool (sources /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh), script:
+Claude Code Bash tool (sources /home/agent/.claude/shell-snapshots/snapshot-bash-1-abc.sh; unsets which, unsetenv; stdin from /dev/null), script:
 
 sudo -A apt-get update
 sudo -A apt-get install -y make
@@ -241,9 +241,10 @@ Enter or **Send**. Lines longer than 72 characters wrap, with an indent.
   the review window, decoded rather than shell-quoted. So does any other
   command line longer than 300 characters.
 - Claude Code runs every Bash tool command inside a wrapper that sources a
-  shell snapshot and records the working directory. When the script matches
-  that wrapper exactly, the review window names the snapshot and shows only
-  the command inside. Anything else is shown in full as a plain script.
+  shell snapshot, removes some aliases and functions, and records the working
+  directory. When the script matches that wrapper exactly, the review window
+  names the snapshot and the removed names, and shows only the command
+  inside. Anything else is shown in full as a plain script.
 - A **WARNING** line appears first, right under the heading, when askpass's
   parent isn't a root-owned `sudo` process, meaning something ran askpass
   directly to read the password. Deny those unless you did it yourself.
