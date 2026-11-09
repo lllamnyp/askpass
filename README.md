@@ -242,9 +242,11 @@ Enter or **Send**. Lines longer than 72 characters wrap, with an indent.
   command line longer than 300 characters.
 - Claude Code runs every Bash tool command inside a wrapper that sources a
   shell snapshot, removes some aliases and functions, and records the working
-  directory. When the script matches that wrapper exactly, the review window
-  names the snapshot and the removed names, and shows only the command
-  inside. Anything else is shown in full as a plain script.
+  directory. The review window names the snapshot and the removed names, and
+  shows only the command inside. A wrapper part it doesn't recognise is
+  listed as written under **UNRECOGNISED WRAPPER PARTS**, and the password
+  dialog's Run from says so too. A script it can't take apart exactly is
+  shown in full as a plain script.
 - A **WARNING** line appears first, right under the heading, when askpass's
   parent isn't a root-owned `sudo` process, meaning something ran askpass
   directly to read the password. Deny those unless you did it yourself.

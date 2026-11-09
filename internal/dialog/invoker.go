@@ -47,14 +47,7 @@ var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true
 func DescribeInvoker(args []string) Invoker {
 	if prefix, script, rest, ok := shellScript(args); ok {
 		if w, ok := claudeCode(script); ok && len(rest) == 0 {
-			header := "Claude Code Bash tool (sources " + w.source + "; unsets " + strings.Join(w.unsets, ", ")
-			if w.stdin != "" {
-				header += "; stdin from " + w.stdin
-			}
-			return Invoker{
-				Summary: "Claude Code Bash tool, script in the review window",
-				Review:  header + "), script:\n\n" + block(w.body),
-			}
+			return w.describe()
 		}
 		header, _ := formatArgs(prefix, -1)
 		header += " followed by the script below"
@@ -130,59 +123,215 @@ func isLetters(s string) bool {
 	return true
 }
 
-// The wrapper Claude Code's Bash tool runs every command in. This is Claude
-// Code's own format, not versioned or documented, and has already changed
-// once (it gained the unalias block for 'which').
-// Anything that doesn't match exactly is shown as a plain shell script.
+// The wrapper Claude Code's Bash tool runs every command in:
+//
+//	<segment> && … && eval '<command>' [< /dev/null] && [<segment> && …] pwd -P >| <dir>/claude-<hex>-cwd
+//
+// This is Claude Code's own format, not versioned or documented, and it keeps
+// changing (it gained an unalias block for 'which', then a bash version
+// guard). Segments it is known to use are summarised; any other segment is
+// shown as written, so a new one degrades the view instead of losing it.
 var (
-	claudeHead = regexp.MustCompile(`^source ([A-Za-z0-9_./-]+) 2>/dev/null \|\| true && shopt -u extglob 2>/dev/null \|\| true && `)
-	// Go regexps have no backreferences, so claudeCode checks that both
-	// names in a block are the same.
-	claudeUnset  = regexp.MustCompile(`^\{ \\builtin unalias -- '([A-Za-z_][A-Za-z0-9_]*)'; \\builtin unset -f -- '([A-Za-z_][A-Za-z0-9_]*)'; \} >/dev/null 2>&1 \|\| true && `)
-	claudeSuffix = regexp.MustCompile(`^(?: < (/dev/null))? && pwd -P >\| [A-Za-z0-9_./-]+/claude-[0-9a-f]+-cwd$`)
+	claudeSource = regexp.MustCompile(`^source ([A-Za-z0-9_./-]+) 2>/dev/null \|\| true && `)
+	// Go regexps have no backreferences, so segment checks that both names
+	// in a block are the same; a block where they differ is unrecognised.
+	claudeUnset = regexp.MustCompile(`^\{ \\builtin unalias -- '([A-Za-z_][A-Za-z0-9_]*)'; \\builtin unset -f -- '([A-Za-z_][A-Za-z0-9_]*)'; \} >/dev/null 2>&1 \|\| true && `)
+	claudeTail  = regexp.MustCompile(`^pwd -P >\| [A-Za-z0-9_./-]+/claude-[0-9a-f]+-cwd$`)
+	// claudeFixed are segments with no parameters; they are not shown.
+	claudeFixed = []string{
+		`{ case "${BASH_VERSINFO-}" in '2'|'3') \builtin printf '%s\n' '__CLAUDE_CODE_DID_NOT_RUN_BASH_TOO_OLD='"${BASH_VERSION-}" >&2; \builtin exit 126; \exit 126;; esac; } && `,
+		`shopt -u extglob 2>/dev/null || true && `,
+	}
 )
 
 // claudeWrapper is what claudeCode found around the command.
 type claudeWrapper struct {
-	source string   // the snapshot it sources
-	unsets []string // the aliases and functions it removes, in order
-	stdin  string   // the stdin redirect, if any
-	body   string   // the command it evals
+	sources []string // the snapshots it sources
+	unsets  []string // the aliases and functions it removes
+	stdin   string   // the stdin redirect, if any
+	body    string   // the command it evals
+	// before and after are the unrecognised segments around the eval, as
+	// written.
+	before, after []string
 }
 
-// claudeCode recognises a Claude Code Bash tool wrapper.
+// claudeCode recognises a Claude Code Bash tool wrapper. The eval is the
+// first segment that starts with "eval "; segments are split only on a " && "
+// that lexSegment finds outside any quoting or grouping.
 func claudeCode(script string) (w claudeWrapper, ok bool) {
-	m := claudeHead.FindStringSubmatch(script)
-	if m == nil {
-		return w, false
-	}
-	w.source = m[1]
-	s := script[len(m[0]):]
-	for {
-		u := claudeUnset.FindStringSubmatch(s)
-		if u == nil {
-			break
-		}
-		if u[1] != u[2] {
+	s := script
+	for !strings.HasPrefix(s, "eval ") {
+		if s, ok = w.segment(s, &w.before); !ok {
 			return w, false
 		}
-		w.unsets = append(w.unsets, u[1])
-		s = s[len(u[0]):]
 	}
-	s, ok = strings.CutPrefix(s, "eval ")
-	if len(w.unsets) == 0 || !ok {
-		return w, false
-	}
-	body, tail, ok := shellWord(s)
+	w.body, s, ok = shellWord(s[len("eval "):])
 	if !ok {
 		return w, false
 	}
-	t := claudeSuffix.FindStringSubmatch(tail)
-	if t == nil {
+	if t, ok := strings.CutPrefix(s, " < /dev/null"); ok {
+		w.stdin, s = "/dev/null", t
+	}
+	if s, ok = strings.CutPrefix(s, " && "); !ok {
 		return w, false
 	}
-	w.stdin, w.body = t[1], body
+	for !claudeTail.MatchString(s) {
+		if s, ok = w.segment(s, &w.after); !ok {
+			return w, false
+		}
+	}
 	return w, true
+}
+
+// segment consumes one segment and its " && " from the start of s, adding it
+// to w or, if it is not one Claude Code is known to use, to unknown.
+func (w *claudeWrapper) segment(s string, unknown *[]string) (rest string, ok bool) {
+	for _, f := range claudeFixed {
+		if t, ok := strings.CutPrefix(s, f); ok {
+			return t, true
+		}
+	}
+	if m := claudeSource.FindStringSubmatch(s); m != nil {
+		w.sources = append(w.sources, m[1])
+		return s[len(m[0]):], true
+	}
+	if m := claudeUnset.FindStringSubmatch(s); m != nil && m[1] == m[2] {
+		w.unsets = append(w.unsets, m[1])
+		return s[len(m[0]):], true
+	}
+	n, ok := lexSegment(s)
+	if !ok {
+		return "", false
+	}
+	*unknown = append(*unknown, s[:n])
+	return s[n+len(" && "):], true
+}
+
+// lexSegment returns the length of the shell text before the first " && "
+// in s that is outside quotes, braces and parentheses. It fails on anything
+// whose quoting it can't follow exactly as bash would ($'…', $(…), `…`,
+// ${…} beyond ${NAME}, here-documents, comments, [[ and ((), since a
+// mistake there could make it take quoted text for the outer eval.
+func lexSegment(s string) (n int, ok bool) {
+	depth := 0
+	for i := 0; i < len(s); {
+		switch c := s[i]; {
+		case strings.HasPrefix(s[i:], " && ") && depth == 0:
+			return i, i > 0
+		case c == '\'':
+			j := strings.IndexByte(s[i+1:], '\'')
+			if j < 0 {
+				return 0, false
+			}
+			i += j + 2
+		case c == '"':
+			j, ok := lexDoubleQuoted(s[i+1:])
+			if !ok {
+				return 0, false
+			}
+			i += j + 1
+		case c == '\\' && i+1 < len(s):
+			i += 2
+		case c == '$':
+			j, ok := lexDollar(s[i:])
+			if !ok {
+				return 0, false
+			}
+			i += j
+		case strings.HasPrefix(s[i:], "((") || strings.HasPrefix(s[i:], "[[") || strings.HasPrefix(s[i:], "<<"):
+			return 0, false
+		case c == '(' || c == '{':
+			depth++
+			i++
+		case c == ')' || c == '}':
+			if depth--; depth < 0 {
+				return 0, false
+			}
+			i++
+		case c == '`' || c == '#' || c == '\\':
+			return 0, false
+		default:
+			i++
+		}
+	}
+	return 0, false
+}
+
+// lexDoubleQuoted returns the length of s up to and including the '"' that
+// closes a double-quoted string.
+func lexDoubleQuoted(s string) (n int, ok bool) {
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case '"':
+			return i + 1, true
+		case '\\':
+			i += 2
+		case '`':
+			return 0, false
+		case '$':
+			j, ok := lexDollar(s[i:])
+			if !ok {
+				return 0, false
+			}
+			i += j
+		default:
+			i++
+		}
+	}
+	return 0, false
+}
+
+var plainExpansion = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*(?::?-)?\}`)
+
+// lexDollar returns the length of the expansion that s starts with.
+func lexDollar(s string) (n int, ok bool) {
+	if len(s) < 2 {
+		return 1, true
+	}
+	switch s[1] {
+	case '(', '\'', '"':
+		return 0, false
+	case '{':
+		m := plainExpansion.FindString(s)
+		return len(m), m != ""
+	}
+	return 1, true
+}
+
+func (w claudeWrapper) describe() Invoker {
+	var parts []string
+	if len(w.sources) > 0 {
+		parts = append(parts, "sources "+strings.Join(w.sources, ", "))
+	}
+	if len(w.unsets) > 0 {
+		parts = append(parts, "unsets "+strings.Join(w.unsets, ", "))
+	}
+	if w.stdin != "" {
+		parts = append(parts, "stdin from "+w.stdin)
+	}
+	header := "Claude Code Bash tool"
+	if len(parts) > 0 {
+		header += " (" + strings.Join(parts, "; ") + ")"
+	}
+	if len(w.before)+len(w.after) == 0 {
+		return Invoker{
+			Summary: "Claude Code Bash tool, script in the review window",
+			Review:  header + ", script:\n\n" + block(w.body),
+		}
+	}
+	header += ", with UNRECOGNISED WRAPPER PARTS, which run as written:\n"
+	for _, p := range w.before {
+		e, _ := escape(p, -1, false)
+		header += "  before the script: " + e + "\n"
+	}
+	for _, p := range w.after {
+		e, _ := escape(p, -1, false)
+		header += "  after the script: " + e + "\n"
+	}
+	return Invoker{
+		Summary: "Claude Code Bash tool with UNRECOGNISED WRAPPER PARTS, script in the review window",
+		Review:  header + "Script:\n\n" + block(w.body),
+	}
 }
 
 // shellWord decodes a shell word made only of '…' runs and "'" pieces, the
